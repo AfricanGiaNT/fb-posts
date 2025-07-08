@@ -1,0 +1,89 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+Perfect — now here’s your repurposed Style Guide tailored for your AI Facebook Content Generator system. It covers coding, prompt formatting, tone rules, and documentation structure that reflects your new focus.
+
+⸻
+
+✨ Style Guide: AI Facebook Content Generator
+
+💻 Coding Standards
+
+Languages & Tools
+	•	Primary Language: Python for scripts, JavaScript for Telegram or front-end interactions
+	•	AI Interaction: Use OpenAI’s GPT-4o API or Cursor AI internal agents
+
+Naming Conventions
+	•	Variables (Python): lower_case_with_underscores
+	•	Functions (Python): snake_case (e.g., generate_draft())
+	•	JS Functions (if needed): camelCase
+	•	Files: lowercase_with_underscores.py or .md
+	•	Draft Naming: Based on post title (e.g., telegram_bot_announcement.md)
+
+Code Formatting
+	•	2-space indentation
+	•	Function definitions must include docstrings
+
+def generate_draft(markdown_input):
+    """Generate a Facebook post draft from markdown input."""
+
+
+	•	Avoid magic values — use constants (e.g., DEFAULT_TONE = "Behind-the-Build")
+
+⸻
+
+📄 Documentation & Prompt Structure
+
+Markdown Files
+	•	Use .md or .mdc for all human-readable files and rules
+	•	Store in /rules/, /docs/, and /content/
+
+Required Files
+
+File	Purpose
+instructions.md	How to use the system
+tone_guidelines.mdc	Defines personal brand tones
+ai_prompt_structure.mdc	Master prompt format for AI
+persona_phrases.mdc	Branded, recurring phrases and style cues
+
+Comments & Inline Examples
+	•	Include example output directly in AI rules
+
+## Example Output (Tone 2: What Broke)
+I broke something I built. And I loved it.
+
+
+
+⸻
+
+🤖 Instructions for AI Output Style
+
+AI Formatting Rules
+	•	Use short paragraphs (2–3 lines)
+	•	Add line breaks between logical sections
+	•	Insert relevant emojis naturally (not overloaded)
+	•	Maintain a casual, reflective tone
+	•	Include hooks and end with insights, reflections, or soft CTAs
+
+Output Must:
+	•	Start with a relatable hook
+(e.g., “I broke something I built. And I loved it.”)
+	•	Match one of the 5 defined tones
+	•	Avoid robotic/formal phrasing (e.g., “This system is very efficient.” → ❌)
+	•	Include personal context or emotion
+
+⸻
+
+✍️ AI Style Suggestions
+
+If AI deviates from tone or formatting:
+	•	Suggest rephrasing for more personality
+	•	Recommend better hook or ending CTA
+	•	Flag overuse or absence of emojis
+	•	Recommend tone switch (e.g., from dry → “Behind-the-Build”)
+
+⸻
+
+Let me know if you’d like this as a .mdc file for your /rules/ folder or if we should now move on to your final rule file (if there’s one left).

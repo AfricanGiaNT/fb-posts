@@ -1,0 +1,23 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+
+Create a Plan:  
+Before starting any work, create a clear and detailed plan in markdown format.  
+
+Ask Clarifying Questions:  
+Ask me  and yourself any clarifying questions you need in order to fully understand the task before generating the plan.  
+
+Critique Your Plan:  
+After you generate the plan, critique your own plan for completeness, clarity, and potential issues.  
+
+Revise if Needed:  
+If your critique reveals any gaps or improvements, revise and regenerate the plan as needed.  
+
+Document the Plan:  
+Add the finalized plan to instructions.md so it can be referenced throughout the project.  
+
+Refer Back Frequently:  
+Refer back to the plan in instructions.md frequently during the project to ensure you stay aligned with the goals.

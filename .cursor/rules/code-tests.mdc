@@ -1,0 +1,26 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+  
+Write Code Incrementally:  
+Before starting any coding, write code incrementally, in small chunks of Edit-Test loops.  
+
+Define a Small Task:  
+Define a small task or feature increment for you to focus on.  
+
+Write a Failing Test:  
+Write  a test case that fails for this increment.  
+
+Instruct You to Write Code:  
+write test code that will pass the test.  
+
+Run the Test:  
+run the test.  
+
+Analyze and Fix if Failed:  
+If the test fails, analyze the failure and attempt to fix the code, looping back to the previous step.  
+
+Review Changes:  
+Once the test passes, I will review the changes as the developer.

@@ -1,0 +1,70 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+Great — let’s repurpose this form handling rule for your AI Facebook Content Generator project, where the goal is to handle .md inputs (manual or via Telegram), generate drafts, and store them cleanly in Airtable.
+
+Here’s the revised version:
+
+⸻
+
+🧾 Form Handling: AI Facebook Content Generator
+
+📥 Input Sources
+
+✅ Markdown Upload (Manual or Auto-Logged)
+	•	You will write or generate .md files that document:
+	•	Features implemented
+	•	Development journey
+	•	Problems and solutions
+	•	These will be saved in /content/markdown_logs/ or uploaded manually via form.
+
+💬 Telegram Bot (Optional, Future)
+	•	Submit quick summaries or upload .md files via commands.
+	•	Syntax: /post <title> + attach .md file
+	•	Syntax: /tone <number> to pick a brand tone (1–5)
+	•	Example:
+/post Telegram AI Bot → triggers AI draft
+/tone 2 → applies “What Broke” tone
+
+⸻
+
+⚙️ Processing Rules
+	•	Markdown content is parsed and processed by AI using a custom prompt (stored in /rules/ai_prompt_structure.mdc)
+	•	The selected tone is either:
+	•	Detected based on content, OR
+	•	Manually selected by the user (via Telegram or Notion form)
+	•	The AI:
+	•	Fixes grammar and structure
+	•	Adds a story hook
+	•	Formats post with emoji, line breaks, bold highlights
+	•	Injects your brand voice from /rules/tone_guidelines.mdc
+
+⸻
+
+
+
+
+
+⸻
+
+🔐 Input Validation
+	•	Ensure Markdown content has at least one paragraph or section.
+	•	If tone isn’t provided, AI should auto-pick best-fitting tone.
+	•	If no title is provided, auto-generate a title based on first H1 in .md.
+	•	Telegram file uploads must be .md or .txt only.
+
+⸻
+
+🤖 Instructions for AI Agent
+	•	Use NLP + parsing to:
+	•	Identify key ideas (e.g., what was built, what broke, what changed)
+	•	Detect relevant tone style (or follow /tone selection)
+	•	Apply prompt logic from /rules/ai_prompt_structure.mdc
+	•	Provide user feedback:
+	•	“✅ Draft for Telegram Bot Builder saved to Airtable”
+	•	“⚠️ No valid content found in Markdown — please check the file”
+	•	Handle exceptions gracefully, escalate unclear content to manual review
+
+⸻

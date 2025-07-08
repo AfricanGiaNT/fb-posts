@@ -1,0 +1,84 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+Perfect — let’s now repurpose those rules and structure for your AI Facebook Content Generator project. I’ll align everything with what we’ve built so far: Markdown-based input, tone-driven AI transformation, and Airtable integration.
+
+Here’s the revised version 👇
+
+⸻
+
+📁 Folder Structure: AI Facebook Content Generator
+
+🔐 Root Directory
+
+This directory houses all files, rules, scripts, and configurations related to the content generation pipeline built using Cursor AI.
+
+⸻
+
+/scripts/: Core Logic and Automation
+
+Contains backend logic and automation scripts.
+
+Subfolder	Purpose	Example Files
+transform/	Markdown → Facebook post transformer scripts	generate_post.py, apply_tone_style.js
+utils/	Shared helper functions (e.g., tone selector, emoji formatter)	tone_picker.py, markdown_parser.js
+integration/	Connectors to Airtable, Telegram, Notion	airtable_upload.py, telegram_send_draft.js
+
+
+
+⸻
+
+/config/: Configuration Files
+
+File	Purpose
+openai_key.env	API key for GPT-4o
+airtable_config.json	Base/table schema reference
+persona_settings.json	Brand voice, tone rules, and prompts
+
+
+
+⸻
+
+/rules/: AI Behavior & Tone Rules
+
+Markdown files defining:
+	•	Brand tone templates
+	•	Prompt structures
+	•	Style guides for AI output
+
+Example: tone_guidelines.mdc, persona_phrases.mdc, ai_prompt_structure.mdc
+
+⸻
+
+/content/: Input and Output
+
+Folder	Contents
+markdown_logs/	Raw .md input files from project logs
+generated_drafts/	AI-generated Facebook post drafts
+reviewed_drafts/	Final edited versions post-review
+
+
+
+⸻
+
+/docs/: Internal Documentation
+	•	README.md: Project overview and setup
+	•	instructions.md: Step-by-step usage guide
+	•	workflow_diagram.md: Visual explanation of the content pipeline
+
+⸻
+
+
+⸻
+
+🧠 Instructions for AI & Developer Guidelines
+	•	Maintain a flat and modular folder structure for easy scalability.
+	•	All AI transformation logic should be reusable and centralized under scripts/transform/.
+	•	Use environment variables from /config/ for all API keys and tokens — no hardcoding.
+	•	Brand tone samples and persona behaviors must be kept in /rules/ as .mdc files.
+	•	If a new channel is added (e.g., LinkedIn or email), mirror the structure inside /scripts/ and /rules/ with appropriate naming (e.g., linkedin_transform.py).
+	•	Use Airtable only as the source of truth for content tracking and review status.
+
+⸻

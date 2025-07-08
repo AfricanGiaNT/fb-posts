@@ -1,0 +1,32 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+Write a Report with File Details and Issues:
+
+Before concluding any coding or development task, write a report detailing all files involved and the problems encountered.
+
+List All Files:
+
+Include a comprehensive list of all files generated or modified during the task, ensuring each file is clearly named.
+
+Describe File Functions:
+
+For each listed file, provide a brief description of what it does and its purpose within the project.
+
+Document Problems Encountered:
+
+Detail any problems or challenges you encountered during the task, including errors, unexpected behaviors, or limitations.
+
+Explain Solutions or Workarounds:
+
+If problems were resolved, explain the solutions or workarounds you applied; if unresolved, note them for my attention.
+
+Format the Report:
+
+Present the report in a clear, structured format (e.g., markdown) with sections for files, functions, and issues, making it easy for me to review.
+
+Submit for Review:
+
+Provide the completed report to me for review once finished, ensuring I have a full understanding of the task's progress and status.
