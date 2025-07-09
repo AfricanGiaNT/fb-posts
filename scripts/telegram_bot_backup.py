@@ -6,8 +6,7 @@ import logging
 from pathlib import Path
 from datetime import datetime
 import asyncio
-import uuid
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Document
 from telegram.ext import (
@@ -60,79 +59,6 @@ class FacebookContentBot:
         
         # Text message handler
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
-    
-    def _initialize_session(self, user_id: int, markdown_content: str, filename: str) -> Dict:
-        """Initialize a new multi-post session."""
-        series_id = str(uuid.uuid4())
-        
-        session = {
-            'series_id': series_id,
-            'original_markdown': markdown_content,
-            'filename': filename,
-            'posts': [],  # List of approved posts in this series
-            'current_draft': None,  # Current post being reviewed
-            'session_started': datetime.now().isoformat(),
-            'last_activity': datetime.now().isoformat(),
-            'session_context': '',  # AI context summary for continuity
-            'post_count': 0
-        }
-        
-        self.user_sessions[user_id] = session
-        return session
-    
-    def _add_post_to_series(self, user_id: int, post_data: Dict, airtable_record_id: str, 
-                           parent_post_id: Optional[str] = None, relationship_type: Optional[str] = None):
-        """Add an approved post to the user's series."""
-        if user_id not in self.user_sessions:
-            return
-        
-        session = self.user_sessions[user_id]
-        session['post_count'] += 1
-        
-        post_entry = {
-            'post_id': session['post_count'],
-            'content': post_data.get('post_content', ''),
-            'tone_used': post_data.get('tone_used', 'Unknown'),
-            'airtable_record_id': airtable_record_id,
-            'approved_at': datetime.now().isoformat(),
-            'parent_post_id': parent_post_id,
-            'relationship_type': relationship_type,
-            'content_summary': post_data.get('post_content', '')[:100] + '...' if len(post_data.get('post_content', '')) > 100 else post_data.get('post_content', '')
-        }
-        
-        session['posts'].append(post_entry)
-        session['last_activity'] = datetime.now().isoformat()
-        
-        # Update session context for AI continuity
-        self._update_session_context(user_id)
-    
-    def _update_session_context(self, user_id: int):
-        """Update the session context for AI continuity."""
-        if user_id not in self.user_sessions:
-            return
-        
-        session = self.user_sessions[user_id]
-        posts = session['posts']
-        
-        if not posts:
-            session['session_context'] = ""
-            return
-        
-        # Create context summary for AI
-        context_parts = [
-            f"Series: {len(posts)} posts created from {session['filename']}",
-            f"Original project: {session['original_markdown'][:200]}...",
-            ""
-        ]
-        
-        for post in posts:
-            context_parts.append(f"Post {post['post_id']}: {post['tone_used']} tone")
-            context_parts.append(f"Content: {post['content_summary']}")
-            if post['relationship_type']:
-                context_parts.append(f"Relationship: {post['relationship_type']}")
-            context_parts.append("")
-        
-        session['session_context'] = "\n".join(context_parts)
     
     async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command."""
@@ -251,13 +177,13 @@ Need help? Just send a markdown file to begin! 🚀
             file_content = await file.download_as_bytearray()
             markdown_content = file_content.decode('utf-8')
             
-            # Initialize or update session
-            if user_id in self.user_sessions:
-                # If user already has a session, add the new file to it
-                self._add_post_to_series(user_id, {'post_content': markdown_content}, '', parent_post_id='initial_upload')
-            else:
-                # If no session, start a new one
-                self._initialize_session(user_id, markdown_content, document.file_name)
+            # Store in user session
+            self.user_sessions[user_id] = {
+                'markdown_content': markdown_content,
+                'filename': document.file_name,
+                'current_draft': None,
+                'airtable_record_id': None
+            }
             
             # Generate Facebook post
             await self._generate_and_show_post(update, context, markdown_content)
@@ -424,12 +350,6 @@ What would you like to do?
             await self._show_tone_options(query, session)
         elif action == "cancel":
             await self._cancel_session(query, user_id)
-        elif action == "generate_another":
-            await self._generate_another_post(query, session)
-        elif action == "new_file":
-            await self._new_file_session(query, user_id)
-        elif action == "done":
-            await self._finish_session(query, user_id)
         elif action.startswith("tone_"):
             # Handle tone selection
             tone_name = action.replace("tone_", "").replace("_", " ")
@@ -444,66 +364,40 @@ What would you like to do?
             # Create a title from filename for display purposes only
             display_title = filename.replace('.md', '').replace('_', ' ').title()
             
-            # Save to Airtable with FULL multi-post support
-            record_id = self.airtable.save_draft_with_multi_post_fields(
-                post_data=post_data,
-                title=display_title,
-                review_status="📝 To Review",
-                series_id=session['series_id'],
-                sequence_number=session['post_count'] + 1,
-                parent_post_id=None,  # TODO: Will be set when building on previous posts
-                relationship_type=None,  # TODO: Will be set when building on previous posts
-                session_context=session['session_context']
-            )
+            # Save to Airtable
+            record_id = self.airtable.save_draft(post_data, display_title, "📝 To Review")
+            session['airtable_record_id'] = record_id
             
-            # Add to series
-            self._add_post_to_series(query.from_user.id, post_data, record_id)
-            
-            # Create success message with action buttons
-            success_message = f"""✅ **Post Approved & Saved\\!**
+            success_message = f"""
+✅ **Post Approved & Saved!**
 
-📊 **Series Info:**
-• File: {self._escape_markdown(filename)}
-• Posts in series: {session['post_count']}
-• Series ID: {session['series_id'][:8]}\\.\\.\\. 
-• Record ID: {record_id}
+**File:** {filename}
+**Status:** Ready for Facebook publishing
+**Airtable Record ID:** {record_id}
 
-🚀 **v2\\.0 Multi\\-Post Ready\\!**
-• Series tracking active
-• Post sequence: {session['post_count']}
-• AI context saved
-• Relationship support enabled
+Your post is now saved in Airtable with:
+• Generated draft content
+• AI tone analysis and reasoning
+• Auto-extracted tags
+• Content summary and length metrics
+• Improvement suggestions
 
-📝 **Saved to Airtable for review & publishing**"""
+**Next Steps:**
+1. Open your Airtable Content Tracker
+2. Find the approved post
+3. Copy the content to Facebook
+4. Update the "Post URL (After Publishing)" field in Airtable
+
+*Send another markdown file to generate more posts!*
+            """
             
-            # Create inline keyboard for next actions
-            keyboard = [
-                [
-                    InlineKeyboardButton("🔄 Generate Another Post", callback_data="generate_another"),
-                    InlineKeyboardButton("📁 New File", callback_data="new_file")
-                ],
-                [
-                    InlineKeyboardButton("✅ Done", callback_data="done")
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await query.edit_message_text(
-                success_message,
-                parse_mode='MarkdownV2',
-                reply_markup=reply_markup
-            )
+            await query.edit_message_text(success_message, parse_mode='Markdown')
             
         except Exception as e:
-            # Fallback to simple message if formatting fails
-            try:
-                simple_message = f"✅ Post approved and saved to Airtable!\n\nRecord ID: {record_id}\nSeries: {session['post_count']} posts\n\nSend another .md file to continue or type 'done' to finish."
-                await query.edit_message_text(simple_message)
-            except:
-                # Final fallback
-                await query.edit_message_text("✅ Post approved and saved successfully!")
-            
-            print(f"Warning: Success message formatting error: {e}")
+            await query.edit_message_text(
+                f"❌ **Error saving post:** {str(e)}",
+                parse_mode='Markdown'
+            )
     
     async def _regenerate_post(self, query, session):
         """Regenerate the post with general feedback."""
@@ -515,7 +409,7 @@ What would you like to do?
             )
             
             # Regenerate with general feedback
-            markdown_content = session['original_markdown'] # Use original markdown for regeneration
+            markdown_content = session['markdown_content']
             post_data = self.ai_generator.regenerate_post(
                 markdown_content,
                 feedback="User requested regeneration - try different tone or approach"
@@ -642,7 +536,7 @@ What would you like to do?
                 selected_tone = tone_name
             
             # Regenerate with specific tone
-            markdown_content = session['original_markdown'] # Use original markdown for regeneration
+            markdown_content = session['markdown_content']
             post_data = self.ai_generator.regenerate_post(
                 markdown_content,
                 feedback=f"User specifically requested {selected_tone} tone",
@@ -723,278 +617,13 @@ What would you like to do?
             parse_mode='Markdown'
         )
     
-    async def _generate_another_post(self, query, session):
-        """Generate another post from the same project."""
-        try:
-            await query.edit_message_text(
-                "🔄 **Generating another post from your project...**\n\n"
-                "⏳ Creating a new perspective on your content...",
-                parse_mode='Markdown'
-            )
-            
-            # Use the original markdown to generate a new post
-            markdown_content = session['original_markdown']
-            
-            # Generate with context from previous posts
-            context_prompt = f"\n\nPrevious posts in this series: {session['post_count']} posts already created. Try a different angle or aspect."
-            
-            post_data = self.ai_generator.generate_facebook_post(
-                markdown_content + context_prompt,
-                user_tone_preference=None  # Let AI decide
-            )
-            
-            # Store the new draft
-            session['current_draft'] = post_data
-            session['last_activity'] = datetime.now().isoformat()
-            
-            # Send new message instead of editing (preserves approved post)
-            await self._send_new_post_message(query, post_data, session)
-            
-        except Exception as e:
-            await query.edit_message_text(
-                f"❌ **Error generating another post:** {str(e)}"
-            )
-    
-    async def _send_new_post_message(self, query, post_data: Dict, session: Dict):
-        """Send a new message with the generated post (preserves previous messages)."""
-        # Create inline keyboard for the new post
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Approve", callback_data="approve"),
-                InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
-            ],
-            [
-                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Get and format post content
-        post_content = post_data.get('post_content', 'No content generated')
-        tone_reason = post_data.get('tone_reason', 'No reason provided')
-        
-        # Escape and truncate content
-        post_content = self._escape_markdown(post_content)
-        tone_reason = self._escape_markdown(tone_reason)
-        
-        if len(post_content) > 2000:
-            display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display]*"
-        else:
-            display_content = post_content
-        
-        if len(tone_reason) > 500:
-            display_reason = tone_reason[:500] + "..."
-        else:
-            display_reason = tone_reason
-        
-        # Create the message
-        post_preview = f"""
-🔄 **New Post Generated \\(#{session['post_count'] + 1}\\)**
-
-**Tone:** {post_data.get('tone_used', 'Unknown')}
-
-**Content:**
-───────────────────────────
-{display_content}
-───────────────────────────
-
-**AI Reasoning:** {display_reason}
-
-What would you like to do?
-        """
-        
-        # Send as new message to preserve approved post
-        await query.message.reply_text(
-            self._truncate_message(post_preview),
-            reply_markup=reply_markup
-        )
-    
-    async def _new_file_session(self, query, user_id):
-        """Clear session and wait for new file."""
-        if user_id in self.user_sessions:
-            del self.user_sessions[user_id]
-        
-        await query.edit_message_text(
-            "📁 **Ready for new file!**\n\n"
-            "Send me a new `.md` file to start a fresh content series! 📄",
-            parse_mode='Markdown'
-        )
-    
-    async def _finish_session(self, query, user_id):
-        """Finish the session."""
-        session_info = ""
-        if user_id in self.user_sessions:
-            session = self.user_sessions[user_id]
-            session_info = f"\n\n**Session Summary:**\n• {session['post_count']} posts created\n• Series ID: {session['series_id'][:8]}..."
-            del self.user_sessions[user_id]
-        
-        await query.edit_message_text(
-            f"✅ **Session Complete!**{session_info}\n\n"
-            "All posts have been saved to Airtable. 📝\n\n"
-            "Send a new markdown file when you're ready to create more content! 🚀",
-            parse_mode='Markdown'
-        )
-    
     async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle text messages."""
-        user_id = update.effective_user.id
-        text = update.message.text.lower().strip()
-        
-        # Check if user has an active session and is responding to "generate another post"
-        if user_id in self.user_sessions and text in ['yes', 'y', 'sure', 'okay', 'ok']:
-            session = self.user_sessions[user_id]
-            
-            # Check if they just approved a post (have posts in series)
-            if session.get('post_count', 0) > 0:
-                # Simulate a callback query for generate_another
-                try:
-                    await update.message.reply_text(
-                        "🔄 **Generating another post from your project...**\n\n"
-                        "⏳ Creating a new perspective on your content...",
-                        parse_mode='Markdown'
-                    )
-                    
-                    # Use the original markdown to generate a new post
-                    markdown_content = session['original_markdown']
-                    
-                    # Generate with context from previous posts
-                    context_prompt = f"\n\nPrevious posts in this series: {session['post_count']} posts already created. Try a different angle or aspect."
-                    
-                    post_data = self.ai_generator.generate_facebook_post(
-                        markdown_content + context_prompt,
-                        user_tone_preference=None  # Let AI decide
-                    )
-                    
-                    # Store the new draft
-                    session['current_draft'] = post_data
-                    session['last_activity'] = datetime.now().isoformat()
-                    
-                    # Show the new post as a new message
-                    await self._send_new_post_message_from_update(update, post_data, session)
-                    return
-                    
-                except Exception as e:
-                    await update.message.reply_text(
-                        f"❌ **Error generating another post:** {str(e)}"
-                    )
-                    return
-        
-        # Default response for other text messages
         await update.message.reply_text(
             "👋 Hi! I work with markdown files.\n\n"
             "📄 **Send me a `.md` file** to generate a Facebook post!\n\n"
             "Use `/help` for more information.",
             parse_mode='Markdown'
-        )
-    
-    async def _send_new_post_message_from_update(self, update: Update, post_data: Dict, session: Dict):
-        """Send a new message with the generated post from an update (preserves previous messages)."""
-        # Create inline keyboard for the new post
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Approve", callback_data="approve"),
-                InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
-            ],
-            [
-                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Get and format post content
-        post_content = post_data.get('post_content', 'No content generated')
-        tone_reason = post_data.get('tone_reason', 'No reason provided')
-        
-        # Escape and truncate content
-        post_content = self._escape_markdown(post_content)
-        tone_reason = self._escape_markdown(tone_reason)
-        
-        if len(post_content) > 2000:
-            display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display]*"
-        else:
-            display_content = post_content
-        
-        if len(tone_reason) > 500:
-            display_reason = tone_reason[:500] + "..."
-        else:
-            display_reason = tone_reason
-        
-        # Create the message
-        post_preview = f"""
-🔄 **New Post Generated \\(#{session['post_count'] + 1}\\)**
-
-**Tone:** {post_data.get('tone_used', 'Unknown')}
-
-**Content:**
-───────────────────────────
-{display_content}
-───────────────────────────
-
-**AI Reasoning:** {display_reason}
-
-What would you like to do?
-        """
-        
-        # Send as new message to preserve approved post
-        await update.message.reply_text(
-            self._truncate_message(post_preview),
-            reply_markup=reply_markup
-        )
-    
-    async def _show_generated_post(self, update: Update, post_data: Dict, session: Dict):
-        """Show a generated post with action buttons."""
-        # Create inline keyboard for the new post
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Approve", callback_data="approve"),
-                InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
-            ],
-            [
-                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Get and format post content
-        post_content = post_data.get('post_content', 'No content generated')
-        tone_reason = post_data.get('tone_reason', 'No reason provided')
-        
-        # Escape and truncate content
-        post_content = self._escape_markdown(post_content)
-        tone_reason = self._escape_markdown(tone_reason)
-        
-        if len(post_content) > 2000:
-            display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display]*"
-        else:
-            display_content = post_content
-        
-        if len(tone_reason) > 500:
-            display_reason = tone_reason[:500] + "..."
-        else:
-            display_reason = tone_reason
-        
-        # Create the message
-        post_preview = f"""
-🔄 **New Post Generated \\(#{session['post_count'] + 1}\\)**
-
-**Tone:** {post_data.get('tone_used', 'Unknown')}
-
-**Content:**
-───────────────────────────
-{display_content}
-───────────────────────────
-
-**AI Reasoning:** {display_reason}
-
-What would you like to do?
-        """
-        
-        await update.message.reply_text(
-            self._truncate_message(post_preview),
-            reply_markup=reply_markup
         )
     
     def run(self):

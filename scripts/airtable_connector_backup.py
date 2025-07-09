@@ -18,22 +18,14 @@ class AirtableConnector:
             api_key=self.config.airtable_api_key
         )
     
-    def save_draft(self, post_data: Dict, title: str, review_status: str = "📝 To Review", 
-                   series_id: Optional[str] = None, sequence_number: Optional[int] = None,
-                   parent_post_id: Optional[str] = None, relationship_type: Optional[str] = None,
-                   session_context: Optional[str] = None) -> str:
+    def save_draft(self, post_data: Dict, title: str, review_status: str = "📝 To Review") -> str:
         """
-        Save a generated draft to Airtable with multi-post support.
+        Save a generated draft to Airtable.
         
         Args:
             post_data: Dictionary containing post content and metadata
             title: Title for the post
             review_status: Initial review status
-            series_id: UUID for the post series
-            sequence_number: Position in the series (1, 2, 3, etc.)
-            parent_post_id: ID of the post this builds upon
-            relationship_type: Type of relationship to parent post
-            session_context: Context for AI continuity
             
         Returns:
             Airtable record ID
@@ -65,13 +57,13 @@ class AirtableConnector:
             # Extract tags that match Airtable options exactly
             extracted_tags = self._extract_tags_from_content(post_data.get('original_markdown', ''))
             
-            # Prepare the record data with core fields that exist in current Airtable
+            # Prepare the record data matching user's Airtable structure
             record_data = {
                 'Post Title': title,
                 'Markdown Source': post_data.get('original_markdown', ''),
                 'Generated Draft': post_content,
                 'Tone Used': airtable_tone,
-                'Review Status': review_status,
+                'Review Status': review_status,  # This should already be properly formatted
                 'AI Notes or Edits': post_data.get('tone_reason', ''),
                 'Tags / Categories': extracted_tags
             }
@@ -84,87 +76,12 @@ class AirtableConnector:
             if post_data.get('is_regeneration'):
                 record_data['AI Notes or Edits'] += f"\n\nRegenerated with feedback: {post_data.get('regenerated_with_feedback', '')}"
             
-            # For Phase 1, we'll skip the new multi-post fields to avoid errors
-            # These will be added in a separate Airtable schema update step
-            
             # Save to Airtable
             created_record = self.airtable.insert(record_data)
             return created_record['id']
             
         except Exception as e:
             raise Exception(f"Error saving draft to Airtable: {str(e)}")
-    
-    def save_draft_with_multi_post_fields(self, post_data: Dict, title: str, review_status: str = "📝 To Review", 
-                                         series_id: Optional[str] = None, sequence_number: Optional[int] = None,
-                                         parent_post_id: Optional[str] = None, relationship_type: Optional[str] = None,
-                                         session_context: Optional[str] = None) -> str:
-        """
-        Save a generated draft to Airtable with full multi-post support.
-        This version includes all new fields and should only be used after Airtable schema is updated.
-        
-        Args:
-            post_data: Dictionary containing post content and metadata
-            title: Title for the post
-            review_status: Initial review status
-            series_id: UUID for the post series
-            sequence_number: Position in the series (1, 2, 3, etc.)
-            parent_post_id: ID of the post this builds upon
-            relationship_type: Type of relationship to parent post
-            session_context: Context for AI continuity
-            
-        Returns:
-            Airtable record ID
-        """
-        try:
-            # Call the basic save_draft first
-            record_id = self.save_draft(post_data, title, review_status)
-            
-            # Map relationship types to Airtable values
-            relationship_mapping = {
-                'Different Aspects': '🔍 Different Aspects',
-                'Different Angles': '📐 Different Angles',
-                'Series Continuation': '📚 Series Continuation',
-                'Thematic Connection': '🔗 Thematic Connection',
-                'Technical Deep Dive': '🔧 Technical Deep Dive',
-                'Sequential Story': '📖 Sequential Story'
-            }
-            
-            airtable_relationship = None
-            if relationship_type:
-                airtable_relationship = relationship_mapping.get(relationship_type, relationship_type)
-            
-            # Prepare update data for multi-post fields
-            update_data = {}
-            
-            if series_id:
-                update_data['Post Series ID'] = series_id
-            if sequence_number:
-                update_data['Post Sequence Number'] = sequence_number
-            if parent_post_id:
-                update_data['Parent Post ID'] = parent_post_id
-            if airtable_relationship:
-                update_data['Relationship Type'] = airtable_relationship
-            if session_context:
-                update_data['Session Context'] = session_context
-            
-            # Update the record with multi-post fields first (these work)
-            if update_data:
-                self.airtable.update(record_id, update_data)
-            
-            # Try to add improvement suggestions separately (this may fail)
-            try:
-                improvement_suggestions = self._generate_improvement_suggestions(post_data)
-                if improvement_suggestions:
-                    self.airtable.update(record_id, {'Improvement Suggestions': improvement_suggestions})
-            except Exception as imp_error:
-                # Log the error but don't fail the entire save
-                print(f"Warning: Could not save improvement suggestions: {imp_error}")
-                # The record was still saved successfully with all other fields
-            
-            return record_id
-            
-        except Exception as e:
-            raise Exception(f"Error saving draft with multi-post fields: {str(e)}")
     
     def update_draft_status(self, record_id: str, status: str, reviewed_content: Optional[str] = None) -> bool:
         """
@@ -288,46 +205,6 @@ class AirtableConnector:
             print(f"Error getting drafts by status: {e}")
             return []
     
-    def get_posts_by_series(self, series_id: str) -> List[Dict]:
-        """
-        Get all posts in a series.
-        
-        Args:
-            series_id: UUID of the post series
-            
-        Returns:
-            List of posts in the series, sorted by sequence number
-        """
-        try:
-            records = self.airtable.get_all(
-                formula=f"{{Post Series ID}} = '{series_id}'",
-                sort=['Post Sequence Number']
-            )
-            return records
-        except Exception as e:
-            print(f"Error getting posts by series: {e}")
-            return []
-    
-    def get_post_children(self, parent_post_id: str) -> List[Dict]:
-        """
-        Get all posts that build upon a specific parent post.
-        
-        Args:
-            parent_post_id: ID of the parent post
-            
-        Returns:
-            List of child posts
-        """
-        try:
-            records = self.airtable.get_all(
-                formula=f"{{Parent Post ID}} = '{parent_post_id}'",
-                sort=['Post Sequence Number']
-            )
-            return records
-        except Exception as e:
-            print(f"Error getting post children: {e}")
-            return []
-    
     def _extract_tags_from_content(self, markdown_content: str) -> List[str]:
         """
         Extract relevant tags from markdown content.
@@ -411,17 +288,16 @@ class AirtableConnector:
     def create_content_tracker_fields(self) -> Dict:
         """
         Return the expected field structure for the Content Tracker table.
-        This matches the enhanced Airtable structure with multi-post support.
+        This matches the user's actual Airtable structure.
         
         Returns:
             Dict describing the expected fields
         """
         return {
-            'Post Title': 'Text - Title of the post',
             'Markdown Source': 'Long text - Original markdown content',
             'Generated Draft': 'Long text - AI-generated Facebook post',
-            'Tone Used': 'Single select (🧩 Behind-the-Build, 💡 What Broke, 🚀 Finished & Proud, 🎯 Problem → Solution → Result, 📓 Mini Lesson)',
-            'Review Status': 'Single select (📝 To Review, ✅ Approved, 📝 Needs Editing, ❌ Rejected)',
+            'Tone Used': 'Single select (Behind-the-Build, What Broke, Finished & Proud, Problem → Solution → Result, Mini Lesson)',
+            'Review Status': 'Single select (To Review, Approved, Needs Editing, Rejected)',
             'Scheduled Date': 'Date - When to publish the post',
             'Reviewed Draft': 'Long text - Final edited version',
             'AI Notes or Edits': 'Long text - AI reasoning and feedback',
@@ -429,12 +305,5 @@ class AirtableConnector:
             'Post URL (After Publishing)': 'URL - Link to published Facebook post',
             'Days Until Scheduled': 'Number - Calculated days until scheduled date',
             'Review Completion': 'Date - When review was completed',
-            'Improvement Suggestions': 'Long text - AI-generated suggestions for improvement',
-            
-            # New multi-post fields
-            'Post Series ID': 'Text - UUID linking related posts in a series',
-            'Post Sequence Number': 'Number - Position in the series (1, 2, 3, etc.)',
-            'Parent Post ID': 'Text - Airtable record ID of the parent post',
-            'Relationship Type': 'Single select (🔍 Different Aspects, 📐 Different Angles, 📚 Series Continuation, 🔗 Thematic Connection, 🔧 Technical Deep Dive, 📖 Sequential Story)',
-            'Session Context': 'Long text - AI context for continuity across posts'
+            'Improvement Suggestions': 'Long text - AI-generated suggestions for improvement'
         } 
