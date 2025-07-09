@@ -461,6 +461,15 @@ What would you like to do?
             # Handle tone selection
             tone_name = action.replace("tone_", "").replace("_", " ")
             await self._regenerate_with_tone(query, session, tone_name)
+        elif action.startswith("rel_"):
+            # Handle relationship selection
+            await self._handle_relationship_choice(query, user_id)
+        elif action.startswith("prev_post_"):
+            # Handle previous post selection
+            await self._handle_previous_post_selection(query, user_id)
+        elif action == "confirm_generation":
+            # Handle generation confirmation
+            await self._confirm_generation(query, user_id)
     
     async def _approve_post(self, query, session):
         """Approve and save the post to Airtable."""
@@ -767,44 +776,448 @@ What would you like to do?
         )
     
     async def _generate_another_post(self, query, session):
-        """Generate another post from the same project with full context awareness."""
+        """Generate another post from the same markdown with context awareness."""
         try:
-            await query.edit_message_text(
-                "🔄 **Generating another post from your project...**\n\n"
-                "⏳ Creating a new perspective on your content...",
-                parse_mode='Markdown'
-            )
-            
-            # Use the AI generator's suggestion system for relationship type
-            previous_posts = session.get('posts', [])
-            suggested_relationship = self.ai_generator.suggest_relationship_type(
-                previous_posts, 
-                session['original_markdown']
-            )
-            
-            # Generate with full context awareness
-            markdown_content = session['original_markdown']
-            session_context = session.get('session_context', '')
-            
-            post_data = self.ai_generator.generate_facebook_post(
-                markdown_content,
-                user_tone_preference=None,  # Let AI decide based on context
-                session_context=session_context,
-                previous_posts=previous_posts,
-                relationship_type=suggested_relationship
-            )
-            
-            # Store the new draft
-            session['current_draft'] = post_data
-            session['last_activity'] = datetime.now().isoformat()
-            
-            # Send new message instead of editing (preserves approved post)
-            await self._send_new_post_message(query, post_data, session)
+            # Instead of automatically generating, show relationship selection
+            await self._show_relationship_selection(query, query.from_user.id)
             
         except Exception as e:
             await query.edit_message_text(
-                f"❌ **Error generating another post:** {str(e)}"
+                f"❌ **Error starting post generation:** {str(e)}"
             )
+    
+    async def _show_relationship_selection(self, query, user_id: int):
+        """Show relationship type selection interface."""
+        if user_id not in self.user_sessions:
+            await query.edit_message_text("❌ Session expired. Please upload a new file.")
+            return
+        
+        session = self.user_sessions[user_id]
+        
+        # Set workflow state
+        session['workflow_state'] = 'awaiting_relationship_selection'
+        
+        # Initialize pending generation data
+        session['pending_generation'] = {
+            'relationship_type': None,
+            'parent_post_id': None,
+            'connection_preview': None,
+            'user_confirmed': False
+        }
+        
+        # Get context information
+        posts_count = len(session.get('posts', []))
+        
+        # Create message based on whether there are previous posts
+        if posts_count == 0:
+            message = """
+🎯 **Generate Another Post**
+
+This will be your first related post in the series.
+
+**Choose relationship type for your next post:**
+            """
+        else:
+            message = f"""
+🎯 **Generate Another Post**
+
+Series: {posts_count} posts created
+Building on: {session.get('filename', 'your project')}
+
+**Choose relationship type for your next post:**
+            """
+        
+        # Create inline keyboard with relationship types
+        keyboard = [
+            [
+                InlineKeyboardButton("🔍 Different Aspects", callback_data="rel_different_aspects"),
+                InlineKeyboardButton("📐 Different Angles", callback_data="rel_different_angles")
+            ],
+            [
+                InlineKeyboardButton("📚 Series Continuation", callback_data="rel_series_continuation"),
+                InlineKeyboardButton("🔗 Thematic Connection", callback_data="rel_thematic_connection")
+            ],
+            [
+                InlineKeyboardButton("🔧 Technical Deep Dive", callback_data="rel_technical_deep_dive"),
+                InlineKeyboardButton("📖 Sequential Story", callback_data="rel_sequential_story")
+            ],
+            [
+                InlineKeyboardButton("🤖 AI Decide", callback_data="rel_ai_decide")
+            ]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            message,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+    
+    async def _handle_relationship_choice(self, query, user_id: int):
+        """Handle relationship type selection."""
+        if user_id not in self.user_sessions:
+            await query.edit_message_text("❌ Session expired. Please upload a new file.")
+            return
+        
+        session = self.user_sessions[user_id]
+        
+        # Map callback data to relationship type
+        relationship_map = {
+            'rel_different_aspects': 'Different Aspects',
+            'rel_different_angles': 'Different Angles', 
+            'rel_series_continuation': 'Series Continuation',
+            'rel_thematic_connection': 'Thematic Connection',
+            'rel_technical_deep_dive': 'Technical Deep Dive',
+            'rel_sequential_story': 'Sequential Story',
+            'rel_ai_decide': 'AI Decide'
+        }
+        
+        relationship_type = relationship_map.get(query.data, 'Unknown')
+        
+        # Store the relationship type in pending generation
+        session['pending_generation']['relationship_type'] = relationship_type
+        session['workflow_state'] = 'awaiting_previous_post_selection'
+        
+        # Show previous post selection
+        await self._show_previous_post_selection(query, user_id)
+    
+    async def _show_previous_post_selection(self, query, user_id: int):
+        """Show previous post selection interface."""
+        if user_id not in self.user_sessions:
+            await query.edit_message_text("❌ Session expired. Please upload a new file.")
+            return
+        
+        session = self.user_sessions[user_id]
+        posts = session.get('posts', [])
+        relationship_type = session['pending_generation']['relationship_type']
+        
+        if not posts:
+            # No previous posts, go directly to generation
+            await self._confirm_generation(query, user_id)
+            return
+        
+        message = f"""
+🎯 **Choose Previous Post to Build On**
+
+**Selected Relationship:** {relationship_type}
+
+**Choose which post to build upon:**
+        """
+        
+        # Create buttons for each previous post
+        keyboard = []
+        for post in posts:
+            post_snippet = post.get('content_summary', post.get('content', ''))[:50] + '...'
+            button_text = f"Post {post['post_id']}: {post_snippet}"
+            callback_data = f"prev_post_{post['post_id']}"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+        
+        # Add default option
+        keyboard.append([InlineKeyboardButton("📝 Build on most recent", callback_data="prev_post_recent")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            message,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+
+    async def _handle_previous_post_selection(self, query, user_id: int):
+        """Handle selection of a previous post to build on."""
+        if user_id not in self.user_sessions:
+            await query.edit_message_text("❌ Session expired. Please upload a new file.")
+            return
+        
+        session = self.user_sessions[user_id]
+        posts = session.get('posts', [])
+        
+        # Get the selected post ID from the callback data
+        selected_post_id_str = query.data.replace("prev_post_", "")
+        
+        if selected_post_id_str == "recent":
+            # Handle "most recent" option
+            selected_post = posts[-1] if posts else None
+            parent_post_id = selected_post['post_id'] if selected_post else None
+        else:
+            # Handle specific post ID
+            try:
+                selected_post_id = int(selected_post_id_str)
+                selected_post = None
+                for post in posts:
+                    if post['post_id'] == selected_post_id:
+                        selected_post = post
+                        break
+                parent_post_id = selected_post_id if selected_post else None
+            except ValueError:
+                await query.edit_message_text("❌ Invalid post selection. Please try again.")
+                return
+        
+        if not selected_post:
+            await query.edit_message_text("❌ Could not find the selected post. Please try again.")
+            return
+        
+        # Store the selected post ID
+        session['pending_generation']['parent_post_id'] = parent_post_id
+        session['workflow_state'] = 'awaiting_generation_confirmation'
+        
+        # Show generation confirmation instead of immediately generating
+        await self._show_generation_confirmation(query, user_id, selected_post)
+        
+    async def _show_generation_confirmation(self, query, user_id: int, selected_post: Dict):
+        """Show generation confirmation with connection preview."""
+        if user_id not in self.user_sessions:
+            await query.edit_message_text("❌ Session expired. Please upload a new file.")
+            return
+        
+        session = self.user_sessions[user_id]
+        relationship_type = session['pending_generation']['relationship_type']
+        posts = session.get('posts', [])
+        
+        # Generate enhanced connection preview
+        connection_preview = self._generate_connection_preview(selected_post, relationship_type, posts)
+        connection_strength = self._calculate_connection_strength(relationship_type, selected_post, posts)
+        relationship_emoji = self._get_relationship_emoji(relationship_type)
+        reading_sequence = self._estimate_reading_sequence(posts, selected_post['post_id'])
+        
+        # Store the connection preview in session
+        session['pending_generation']['connection_preview'] = connection_preview
+        
+        # Get strength indicator emoji
+        strength_emoji = {
+            'Strong': '🟢',
+            'Medium': '🟡',
+            'Weak': '🔴'
+        }.get(connection_strength, '🔗')
+        
+        message = f"""
+🎯 **Ready to Generate Post**
+
+{relationship_emoji} **Relationship:** {relationship_type}
+📊 **Connection Strength:** {strength_emoji} {connection_strength}
+🔗 **Building on:** Post {selected_post['post_id']} ({selected_post['tone_used']} tone)
+
+**Previous post preview:** {selected_post['content_summary'][:80]}...
+
+**Connection Preview:**
+{connection_preview}
+
+**Reading Sequence:** {reading_sequence}
+
+Ready to generate your new post?
+        """
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Generate Post", callback_data="confirm_generation"),
+                InlineKeyboardButton("⬅️ Back", callback_data="back_to_relationship_selection")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            message,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+    
+    def _generate_connection_preview(self, selected_post: Dict, relationship_type: str, all_posts: List[Dict]) -> str:
+        """Generate an intelligent connection preview based on relationship type and context."""
+        post_id = selected_post['post_id']
+        post_tone = selected_post['tone_used']
+        post_summary = selected_post['content_summary'][:100]
+        
+        # Base connection text
+        base_text = f"This post will build on Post {post_id} ({post_tone} tone)"
+        
+        # Relationship-specific preview text
+        relationship_descriptions = {
+            'Different Aspects': f"{base_text} using a Different Aspects approach by exploring different aspects of the same topic. While the previous post covered {post_summary.lower()}, this new post will examine other facets and perspectives.",
+            
+            'Different Angles': f"{base_text} using a Different Angles approach by taking a different angle on the same subject. This will provide an alternative viewpoint to complement the {post_tone.lower()} perspective.",
+            
+            'Series Continuation': f"{base_text} as a Series Continuation, serving as the next part in a sequential series. This continues the narrative flow from the previous post.",
+            
+            'Thematic Connection': f"{base_text} through a Thematic Connection, linking posts through shared themes and principles. The posts will be connected by underlying concepts rather than direct narrative flow.",
+            
+            'Technical Deep Dive': f"{base_text} with a Technical Deep Dive approach by providing detailed technical insights. This will dive deeper into the technical aspects mentioned in the previous post.",
+            
+            'Sequential Story': f"{base_text} as a Sequential Story by continuing the story chronologically. This shows what happened next in the timeline.",
+            
+            'AI Decide': f"{base_text} using an AI Decide approach with AI-determined optimal relationship type based on content analysis."
+        }
+        
+        return relationship_descriptions.get(relationship_type, base_text)
+    
+    def _calculate_connection_strength(self, relationship_type: str, selected_post: Dict, all_posts: List[Dict]) -> str:
+        """Calculate connection strength based on relationship type and post context."""
+        # Strong connections - direct narrative flow
+        strong_relationships = ['Sequential Story', 'Series Continuation', 'Technical Deep Dive']
+        
+        # Medium connections - related but not sequential
+        medium_relationships = ['Different Aspects', 'Different Angles']
+        
+        # Weak connections - thematic only
+        weak_relationships = ['Thematic Connection', 'AI Decide']
+        
+        if relationship_type in strong_relationships:
+            return 'Strong'
+        elif relationship_type in medium_relationships:
+            return 'Medium'
+        else:
+            return 'Weak'
+    
+    def _get_relationship_emoji(self, relationship_type: str) -> str:
+        """Get emoji representation for relationship types."""
+        emoji_map = {
+            'Different Aspects': '🔍',
+            'Different Angles': '📐',
+            'Series Continuation': '📚',
+            'Thematic Connection': '🔗',
+            'Technical Deep Dive': '🔧',
+            'Sequential Story': '📖',
+            'AI Decide': '🤖'
+        }
+        return emoji_map.get(relationship_type, '📝')
+    
+    def _estimate_reading_sequence(self, all_posts: List[Dict], building_on_post_id: int) -> str:
+        """Estimate the optimal reading sequence for the post series."""
+        if not all_posts:
+            return "Post 1 → New Post"
+        
+        # Find the post we're building on
+        building_post = None
+        for post in all_posts:
+            if post['post_id'] == building_on_post_id:
+                building_post = post
+                break
+        
+        if not building_post:
+            return f"Post {building_on_post_id} → New Post"
+        
+        # Build sequence up to the building post
+        sequence_parts = []
+        current_post_id = building_on_post_id
+        
+        # Trace back to find the chain
+        post_chain = [building_post]
+        current_parent = building_post.get('parent_post_id')
+        
+        while current_parent:
+            parent_post = None
+            for post in all_posts:
+                if post['post_id'] == current_parent:
+                    parent_post = post
+                    break
+            if parent_post:
+                post_chain.insert(0, parent_post)
+                current_parent = parent_post.get('parent_post_id')
+            else:
+                break
+        
+        # Build the sequence string
+        sequence_parts = [f"Post {post['post_id']}" for post in post_chain]
+        sequence_parts.append("New Post")
+        
+        return " → ".join(sequence_parts)
+    
+    async def _confirm_generation(self, query, user_id: int):
+        """Confirm the generation process."""
+        if user_id not in self.user_sessions:
+            await query.edit_message_text("❌ Session expired. Please upload a new file.")
+            return
+        
+        session = self.user_sessions[user_id]
+        
+        # Get pending generation data
+        relationship_type = session['pending_generation']['relationship_type']
+        parent_post_id = session['pending_generation']['parent_post_id']
+        
+        # Clear pending generation state
+        session['pending_generation'] = {
+            'relationship_type': None,
+            'parent_post_id': None,
+            'connection_preview': None,
+            'user_confirmed': False
+        }
+        session['workflow_state'] = 'awaiting_tone_selection' # Reset workflow
+        
+        # Generate the post with context awareness
+        markdown_content = session['original_markdown']
+        post_data = self.ai_generator.generate_facebook_post(
+            markdown_content,
+            user_tone_preference=None,  # Let AI decide based on context
+            session_context=session['session_context'],
+            previous_posts=session['posts'],
+            relationship_type=relationship_type,
+            parent_post_id=parent_post_id
+        )
+        
+        session['current_draft'] = post_data
+        
+        # Create inline keyboard for user actions
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data="approve"),
+                InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
+            ],
+            [
+                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cancel")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Get post content and ensure it's not too long
+        post_content = post_data.get('post_content', 'No content generated')
+        tone_reason = post_data.get('tone_reason', 'No reason provided')
+        
+        # Escape markdown characters to prevent Telegram parsing errors
+        post_content = self._escape_markdown(post_content)
+        tone_reason = self._escape_markdown(tone_reason)
+        
+        # Truncate content if needed for Telegram display
+        if len(post_content) > 2000:
+            display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display]*"
+        else:
+            display_content = post_content
+        
+        # Truncate reasoning if needed
+        if len(tone_reason) > 500:
+            display_reason = tone_reason[:500] + "..."
+        else:
+            display_reason = tone_reason
+        
+        # Add context-aware information
+        context_info = ""
+        if post_data.get('is_context_aware', False):
+            context_info = f"\n\n🔗 **Context-Aware Generation**"
+            if post_data.get('relationship_type'):
+                context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
+            if session.get('posts'):
+                context_info += f"\n• Building on {len(session.get('posts', []))} previous posts"
+        
+        # Create the message
+        post_preview = f"""
+🎯 **New Post Generated (#{session['post_count'] + 1})**
+
+**Tone:** {post_data.get('tone_used', 'Unknown')}{context_info}
+
+**Content:**
+───────────────────────────
+{display_content}
+───────────────────────────
+
+**AI Reasoning:** {display_reason}
+
+What would you like to do?
+        """
+        
+        await query.edit_message_text(
+            self._truncate_message(post_preview),
+            reply_markup=reply_markup
+        )
     
     async def _send_new_post_message(self, query, post_data: Dict, session: Dict):
         """Send a new message with the generated post (preserves previous messages)."""

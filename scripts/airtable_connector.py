@@ -155,10 +155,18 @@ class AirtableConnector:
             try:
                 improvement_suggestions = self._generate_improvement_suggestions(post_data)
                 if improvement_suggestions:
+                    # Test if the field exists by trying to update with it
                     self.airtable.update(record_id, {'Improvement Suggestions': improvement_suggestions})
             except Exception as imp_error:
-                # Log the error but don't fail the entire save
-                print(f"Warning: Could not save improvement suggestions: {imp_error}")
+                # Silently handle improvement suggestions field errors
+                # This field may not exist in all Airtable bases
+                error_str = str(imp_error)
+                if "Improvement Suggestions" in error_str and "INVALID_VALUE_FOR_COLUMN" in error_str:
+                    # Field doesn't exist or is wrong type - skip silently
+                    pass
+                else:
+                    # Log other unexpected errors
+                    print(f"Warning: Could not save improvement suggestions: {imp_error}")
                 # The record was still saved successfully with all other fields
             
             return record_id
