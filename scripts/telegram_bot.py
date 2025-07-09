@@ -301,22 +301,40 @@ Need help? Just send a markdown file to begin! 🚀
     
     async def _generate_and_show_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
                                      markdown_content: str, tone_preference: Optional[str] = None,
-                                     is_regeneration: bool = False):
-        """Generate and display a Facebook post."""
+                                     is_regeneration: bool = False, relationship_type: Optional[str] = None,
+                                     parent_post_id: Optional[str] = None):
+        """Generate and display a Facebook post with context awareness."""
         user_id = update.effective_user.id
         
         try:
-            # Generate the post
+            # Get session context if available
+            session_context = None
+            previous_posts = None
+            
+            if user_id in self.user_sessions:
+                session = self.user_sessions[user_id]
+                session_context = session.get('session_context', '')
+                previous_posts = session.get('posts', [])
+            
+            # Generate the post with context awareness
             if is_regeneration and tone_preference:
                 post_data = self.ai_generator.regenerate_post(
                     markdown_content, 
                     feedback=f"User requested {tone_preference} tone",
-                    tone_preference=tone_preference
+                    tone_preference=tone_preference,
+                    session_context=session_context,
+                    previous_posts=previous_posts,
+                    relationship_type=relationship_type,
+                    parent_post_id=parent_post_id
                 )
             else:
                 post_data = self.ai_generator.generate_facebook_post(
                     markdown_content, 
-                    tone_preference
+                    tone_preference,
+                    session_context=session_context,
+                    previous_posts=previous_posts,
+                    relationship_type=relationship_type,
+                    parent_post_id=parent_post_id
                 )
             
             # Store in session
@@ -355,11 +373,20 @@ Need help? Just send a markdown file to begin! 🚀
             else:
                 display_reason = tone_reason
             
+            # Add context-aware information to the display
+            context_info = ""
+            if post_data.get('is_context_aware', False):
+                context_info = f"\n\n🔗 **Context-Aware Generation**"
+                if relationship_type:
+                    context_info += f"\n• Relationship: {relationship_type}"
+                if previous_posts:
+                    context_info += f"\n• Building on {len(previous_posts)} previous posts"
+            
             # Format the message
             post_preview = f"""
 🎯 Generated Facebook Post
 
-Tone Used: {post_data.get('tone_used', 'Unknown')}
+Tone Used: {post_data.get('tone_used', 'Unknown')}{context_info}
 
 Content:
 ───────────────────────────
@@ -506,7 +533,7 @@ What would you like to do?
             print(f"Warning: Success message formatting error: {e}")
     
     async def _regenerate_post(self, query, session):
-        """Regenerate the post with general feedback."""
+        """Regenerate the post with general feedback and context awareness."""
         try:
             await query.edit_message_text(
                 "🔄 **Regenerating your post...**\n\n"
@@ -514,11 +541,17 @@ What would you like to do?
                 parse_mode='Markdown'
             )
             
-            # Regenerate with general feedback
-            markdown_content = session['original_markdown'] # Use original markdown for regeneration
+            # Get context for regeneration
+            session_context = session.get('session_context', '')
+            previous_posts = session.get('posts', [])
+            
+            # Regenerate with context awareness
+            markdown_content = session['original_markdown'] 
             post_data = self.ai_generator.regenerate_post(
                 markdown_content,
-                feedback="User requested regeneration - try different tone or approach"
+                feedback="User requested regeneration - try different tone or approach",
+                session_context=session_context,
+                previous_posts=previous_posts
             )
             
             session['current_draft'] = post_data
@@ -545,8 +578,8 @@ What would you like to do?
             tone_reason = self._escape_markdown(tone_reason)
             
             # Truncate content if needed for Telegram display
-            if len(post_content) > 2000:  # Leave room for other message parts
-                display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display - full version saved to Airtable]*"
+            if len(post_content) > 2000:
+                display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display]*"
             else:
                 display_content = post_content
             
@@ -556,38 +589,38 @@ What would you like to do?
             else:
                 display_reason = tone_reason
             
-            # Update message with new content
-            updated_message = f"""
-🔄 Regenerated Facebook Post
+            # Add context-aware information
+            context_info = ""
+            if post_data.get('is_context_aware', False):
+                context_info = f"\n\n🔗 **Context-Aware Regeneration**"
+                if previous_posts:
+                    context_info += f"\n• Building on {len(previous_posts)} previous posts"
+            
+            # Format the message
+            post_preview = f"""
+🔄 **Regenerated Post**
 
-Tone Used: {post_data.get('tone_used', 'Unknown')}
+**Tone:** {post_data.get('tone_used', 'Unknown')}{context_info}
 
-Content:
+**Content:**
 ───────────────────────────
 {display_content}
 ───────────────────────────
 
-AI Reasoning: {display_reason}
+**AI Reasoning:** {display_reason}
 
 What would you like to do?
             """
             
-            # Final safety check and truncation
-            updated_message = self._truncate_message(updated_message)
-            
             await query.edit_message_text(
-                updated_message,
+                self._truncate_message(post_preview),
                 reply_markup=reply_markup
             )
             
         except Exception as e:
-            logger.error(f"Error in _regenerate_post: {str(e)}")
-            try:
-                await query.edit_message_text(
-                    f"❌ Error regenerating post: {str(e)}"
-                )
-            except Exception:
-                logger.error(f"Failed to send regenerate error message: {str(e)}")
+            await query.edit_message_text(
+                f"❌ **Error regenerating post:** {str(e)}"
+            )
     
     async def _show_tone_options(self, query, session):
         """Show tone selection options."""
@@ -622,7 +655,7 @@ What would you like to do?
         )
     
     async def _regenerate_with_tone(self, query, session, tone_name):
-        """Regenerate post with specific tone."""
+        """Regenerate post with specific tone and context awareness."""
         try:
             await query.edit_message_text(
                 f"🎨 **Regenerating with '{tone_name}' tone...**\n\n"
@@ -641,12 +674,18 @@ What would you like to do?
             if not selected_tone:
                 selected_tone = tone_name
             
-            # Regenerate with specific tone
-            markdown_content = session['original_markdown'] # Use original markdown for regeneration
+            # Get context for regeneration
+            session_context = session.get('session_context', '')
+            previous_posts = session.get('posts', [])
+            
+            # Regenerate with specific tone and context awareness
+            markdown_content = session['original_markdown']
             post_data = self.ai_generator.regenerate_post(
                 markdown_content,
                 feedback=f"User specifically requested {selected_tone} tone",
-                tone_preference=selected_tone
+                tone_preference=selected_tone,
+                session_context=session_context,
+                previous_posts=previous_posts
             )
             
             session['current_draft'] = post_data
@@ -673,8 +712,8 @@ What would you like to do?
             tone_reason = self._escape_markdown(tone_reason)
             
             # Truncate content if needed for Telegram display
-            if len(post_content) > 2000:  # Leave room for other message parts
-                display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display - full version saved to Airtable]*"
+            if len(post_content) > 2000:
+                display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display]*"
             else:
                 display_content = post_content
             
@@ -684,25 +723,29 @@ What would you like to do?
             else:
                 display_reason = tone_reason
             
-            # Update message with new content
-            updated_message = f"""
-🎨 Regenerated with '{selected_tone}' tone
+            # Add context-aware information
+            context_info = ""
+            if post_data.get('is_context_aware', False):
+                context_info = f"\n\n🔗 **Context-Aware Regeneration**"
+                if previous_posts:
+                    context_info += f"\n• Building on {len(previous_posts)} previous posts"
+            
+            # Format the message
+            post_preview = f"""
+🎨 **Regenerated with {selected_tone} Tone**
 
-Content:
+**Content:**
 ───────────────────────────
 {display_content}
 ───────────────────────────
 
-AI Reasoning: {display_reason}
+**AI Reasoning:** {display_reason}{context_info}
 
 What would you like to do?
             """
             
-            # Final safety check and truncation
-            updated_message = self._truncate_message(updated_message)
-            
             await query.edit_message_text(
-                updated_message,
+                self._truncate_message(post_preview),
                 reply_markup=reply_markup
             )
             
@@ -724,7 +767,7 @@ What would you like to do?
         )
     
     async def _generate_another_post(self, query, session):
-        """Generate another post from the same project."""
+        """Generate another post from the same project with full context awareness."""
         try:
             await query.edit_message_text(
                 "🔄 **Generating another post from your project...**\n\n"
@@ -732,15 +775,23 @@ What would you like to do?
                 parse_mode='Markdown'
             )
             
-            # Use the original markdown to generate a new post
-            markdown_content = session['original_markdown']
+            # Use the AI generator's suggestion system for relationship type
+            previous_posts = session.get('posts', [])
+            suggested_relationship = self.ai_generator.suggest_relationship_type(
+                previous_posts, 
+                session['original_markdown']
+            )
             
-            # Generate with context from previous posts
-            context_prompt = f"\n\nPrevious posts in this series: {session['post_count']} posts already created. Try a different angle or aspect."
+            # Generate with full context awareness
+            markdown_content = session['original_markdown']
+            session_context = session.get('session_context', '')
             
             post_data = self.ai_generator.generate_facebook_post(
-                markdown_content + context_prompt,
-                user_tone_preference=None  # Let AI decide
+                markdown_content,
+                user_tone_preference=None,  # Let AI decide based on context
+                session_context=session_context,
+                previous_posts=previous_posts,
+                relationship_type=suggested_relationship
             )
             
             # Store the new draft
@@ -788,11 +839,20 @@ What would you like to do?
         else:
             display_reason = tone_reason
         
+        # Add context-aware information
+        context_info = ""
+        if post_data.get('is_context_aware', False):
+            context_info = f"\n\n🔗 **Context-Aware Generation**"
+            if post_data.get('relationship_type'):
+                context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
+            if session.get('posts'):
+                context_info += f"\n• Building on {len(session.get('posts', []))} previous posts"
+        
         # Create the message
         post_preview = f"""
 🔄 **New Post Generated \\(#{session['post_count'] + 1}\\)**
 
-**Tone:** {post_data.get('tone_used', 'Unknown')}
+**Tone:** {post_data.get('tone_used', 'Unknown')}{context_info}
 
 **Content:**
 ───────────────────────────
@@ -804,7 +864,6 @@ What would you like to do?
 What would you like to do?
         """
         
-        # Send as new message to preserve approved post
         await query.message.reply_text(
             self._truncate_message(post_preview),
             reply_markup=reply_markup
@@ -855,15 +914,23 @@ What would you like to do?
                         parse_mode='Markdown'
                     )
                     
-                    # Use the original markdown to generate a new post
-                    markdown_content = session['original_markdown']
+                    # Use the AI generator's suggestion system for relationship type
+                    previous_posts = session.get('posts', [])
+                    suggested_relationship = self.ai_generator.suggest_relationship_type(
+                        previous_posts, 
+                        session['original_markdown']
+                    )
                     
-                    # Generate with context from previous posts
-                    context_prompt = f"\n\nPrevious posts in this series: {session['post_count']} posts already created. Try a different angle or aspect."
+                    # Generate with full context awareness
+                    markdown_content = session['original_markdown']
+                    session_context = session.get('session_context', '')
                     
                     post_data = self.ai_generator.generate_facebook_post(
-                        markdown_content + context_prompt,
-                        user_tone_preference=None  # Let AI decide
+                        markdown_content,
+                        user_tone_preference=None,  # Let AI decide based on context
+                        session_context=session_context,
+                        previous_posts=previous_posts,
+                        relationship_type=suggested_relationship
                     )
                     
                     # Store the new draft
@@ -921,11 +988,20 @@ What would you like to do?
         else:
             display_reason = tone_reason
         
+        # Add context-aware information
+        context_info = ""
+        if post_data.get('is_context_aware', False):
+            context_info = f"\n\n🔗 **Context-Aware Generation**"
+            if post_data.get('relationship_type'):
+                context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
+            if session.get('posts'):
+                context_info += f"\n• Building on {len(session.get('posts', []))} previous posts"
+        
         # Create the message
         post_preview = f"""
 🔄 **New Post Generated \\(#{session['post_count'] + 1}\\)**
 
-**Tone:** {post_data.get('tone_used', 'Unknown')}
+**Tone:** {post_data.get('tone_used', 'Unknown')}{context_info}
 
 **Content:**
 ───────────────────────────
@@ -937,7 +1013,6 @@ What would you like to do?
 What would you like to do?
         """
         
-        # Send as new message to preserve approved post
         await update.message.reply_text(
             self._truncate_message(post_preview),
             reply_markup=reply_markup
