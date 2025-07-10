@@ -51,6 +51,7 @@ class FacebookContentBot:
         self.application.add_handler(CommandHandler("start", self._start_command))
         self.application.add_handler(CommandHandler("help", self._help_command))
         self.application.add_handler(CommandHandler("status", self._status_command))
+        self.application.add_handler(CommandHandler("series", self._series_command))
         
         # Document/file handler
         self.application.add_handler(MessageHandler(filters.Document.ALL, self._handle_document))
@@ -470,6 +471,18 @@ What would you like to do?
         elif action == "confirm_generation":
             # Handle generation confirmation
             await self._confirm_generation(query, user_id)
+        elif action == "series_post_details":
+            await self._show_series_overview(query, context)
+        elif action == "series_export":
+            await self._export_series(query, session)
+        elif action == "series_refresh":
+            await self._show_series_overview(query, context)
+        elif action == "series_close":
+            await query.edit_message_text(
+                "❌ **Series Overview Closed.**\n\n"
+                "Send a new markdown file to start a fresh content series! 📄",
+                parse_mode='Markdown'
+            )
     
     async def _approve_post(self, query, session):
         """Approve and save the post to Airtable."""
@@ -1484,6 +1497,357 @@ What would you like to do?
             self._truncate_message(post_preview),
             reply_markup=reply_markup
         )
+    
+    async def _series_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /series command to show series overview."""
+        user_id = update.effective_user.id
+        
+        # Check if user has an active session
+        if user_id not in self.user_sessions:
+            await update.message.reply_text(
+                "❌ **No active series found.**\n\n"
+                "Upload a markdown file to start a new series! 📄",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Show series overview
+        await self._show_series_overview(update, context)
+    
+    async def _show_series_overview(self, update_or_query, context: ContextTypes.DEFAULT_TYPE):
+        """Display comprehensive series overview."""
+        # Handle both Update and CallbackQuery
+        if hasattr(update_or_query, 'callback_query'):
+            # This is a CallbackQuery from inline button
+            user_id = update_or_query.from_user.id
+            query = update_or_query
+        else:
+            # This is an Update from command
+            user_id = update_or_query.effective_user.id
+            query = None
+        
+        session = self.user_sessions[user_id]
+        
+        # Calculate series statistics
+        stats = self._calculate_series_statistics(session['posts'])
+        
+        # Format series tree
+        tree_display = self._format_series_tree(session['posts'])
+        
+        # Create series metadata info
+        series_info = self._format_series_info(session)
+        
+        # Create overview message
+        overview_message = f"""
+📊 **Series Overview**
+
+{series_info}
+
+**Series Structure:**
+{tree_display}
+
+**Statistics:**
+• Total Posts: {stats['total_posts']}
+• Relationship Types: {', '.join(stats['relationship_types_used']) if stats['relationship_types_used'] else 'None'}
+• Most Used Tone: {stats['most_used_tone']}
+• Creation Timespan: {stats['creation_timespan']}
+
+**Tone Distribution:**
+{self._format_tone_distribution(stats['tone_distribution'])}
+        """
+        
+        # Create navigation keyboard
+        keyboard = self._create_series_navigation_keyboard(session)
+        
+        # Send the overview
+        if query:
+            # This is a callback query, edit the message
+            await query.edit_message_text(
+                self._truncate_message(overview_message.strip()),
+                parse_mode='Markdown',
+                reply_markup=keyboard
+            )
+        else:
+            # This is a command, send new message
+            await update_or_query.message.reply_text(
+                self._truncate_message(overview_message.strip()),
+                parse_mode='Markdown',
+                reply_markup=keyboard
+            )
+    
+    def _build_relationship_tree(self, posts: List[Dict]) -> Dict:
+        """Build relationship tree structure from posts."""
+        if not posts:
+            return {'roots': [], 'children': {}}
+        
+        # Initialize tree structure
+        tree = {'roots': [], 'children': {}}
+        
+        # Create a mapping of post_id to post for quick lookup
+        post_map = {post['post_id']: post for post in posts}
+        
+        # Find root posts (posts with no parent) and build children mapping
+        for post in posts:
+            post_id = post['post_id']
+            parent_id = post.get('parent_post_id')
+            
+            if parent_id is None:
+                # This is a root post
+                tree['roots'].append(post_id)
+            else:
+                # This post has a parent
+                if parent_id not in tree['children']:
+                    tree['children'][parent_id] = []
+                tree['children'][parent_id].append(post_id)
+        
+        return tree
+    
+    def _calculate_series_statistics(self, posts: List[Dict]) -> Dict:
+        """Calculate comprehensive series statistics."""
+        if not posts:
+            return {
+                'total_posts': 0,
+                'relationship_types_used': [],
+                'tone_distribution': {},
+                'creation_timespan': 'No posts',
+                'most_used_tone': 'None'
+            }
+        
+        # Count relationship types
+        relationship_types = []
+        for post in posts:
+            rel_type = post.get('relationship_type')
+            if rel_type and rel_type not in relationship_types:
+                relationship_types.append(rel_type)
+        
+        # Count tone distribution
+        tone_counts = {}
+        for post in posts:
+            tone = post.get('tone_used', 'Unknown')
+            tone_counts[tone] = tone_counts.get(tone, 0) + 1
+        
+        # Find most used tone
+        most_used_tone = max(tone_counts, key=tone_counts.get) if tone_counts else 'None'
+        
+        # Calculate creation timespan
+        creation_timespan = self._calculate_timespan(posts)
+        
+        return {
+            'total_posts': len(posts),
+            'relationship_types_used': relationship_types,
+            'tone_distribution': tone_counts,
+            'creation_timespan': creation_timespan,
+            'most_used_tone': most_used_tone
+        }
+    
+    def _format_series_tree(self, posts: List[Dict]) -> str:
+        """Format series tree for display."""
+        if not posts:
+            return "📝 No posts in this series yet."
+        
+        # Build the relationship tree
+        tree = self._build_relationship_tree(posts)
+        
+        # Create a mapping of post_id to post for quick lookup
+        post_map = {post['post_id']: post for post in posts}
+        
+        # Format the tree display
+        lines = []
+        
+        def format_post_line(post_id: int, prefix: str = "", is_last: bool = True) -> str:
+            """Format a single post line with tree structure."""
+            post = post_map.get(post_id)
+            if not post:
+                return f"{prefix}❌ Post {post_id} (Missing)"
+            
+            # Choose tree connector based on whether this is the last item
+            connector = "└── " if is_last else "├── "
+            
+            # Format post info
+            tone_emoji = self._get_tone_emoji(post['tone_used'])
+            relationship_emoji = self._get_relationship_emoji(post.get('relationship_type', ''))
+            
+            # Truncate content summary
+            summary = post.get('content_summary', 'No summary')[:50]
+            if len(summary) > 50:
+                summary += "..."
+            
+            # Create the continuation prefix for the next line
+            continuation_prefix = prefix + ("    " if is_last else "│   ")
+            
+            return f"{prefix}{connector}{tone_emoji} **Post {post_id}** ({post['tone_used']})\n{continuation_prefix}↳ {relationship_emoji} {summary}"
+        
+        def add_children(parent_id: int, prefix: str = "") -> None:
+            """Recursively add children to the tree display."""
+            children = tree['children'].get(parent_id, [])
+            for i, child_id in enumerate(children):
+                is_last_child = (i == len(children) - 1)
+                lines.append(format_post_line(child_id, prefix, is_last_child))
+                
+                # Add children of this child with proper prefix
+                child_prefix = prefix + ("    " if is_last_child else "│   ")
+                add_children(child_id, child_prefix)
+        
+        # Add root posts and their children
+        for i, root_id in enumerate(tree['roots']):
+            is_last_root = (i == len(tree['roots']) - 1)
+            lines.append(format_post_line(root_id, "", is_last_root))
+            
+            # Add children of this root with proper prefix
+            root_prefix = "    " if is_last_root else "│   "
+            add_children(root_id, root_prefix)
+        
+        return "\n".join(lines)
+    
+    def _format_series_info(self, session: Dict) -> str:
+        """Format series metadata information."""
+        filename = session.get('filename', 'Unknown file')
+        series_id = session.get('series_id', 'Unknown')[:8]
+        post_count = session.get('post_count', 0)
+        
+        # Parse creation date
+        session_started = session.get('session_started', '')
+        if session_started:
+            try:
+                from datetime import datetime
+                created_date = datetime.fromisoformat(session_started.replace('Z', '+00:00'))
+                creation_date = created_date.strftime('%Y-%m-%d %H:%M')
+            except:
+                creation_date = 'Unknown'
+        else:
+            creation_date = 'Unknown'
+        
+        return f"""
+**Series:** {filename}
+**Series ID:** {series_id}...
+**Posts Created:** {post_count}
+**Created:** {creation_date}
+        """.strip()
+    
+    def _format_tone_distribution(self, tone_distribution: Dict) -> str:
+        """Format tone distribution for display."""
+        if not tone_distribution:
+            return "No tones used yet"
+        
+        lines = []
+        for tone, count in sorted(tone_distribution.items(), key=lambda x: x[1], reverse=True):
+            emoji = self._get_tone_emoji(tone)
+            lines.append(f"{emoji} {tone}: {count}")
+        
+        return "\n".join(lines)
+    
+    def _calculate_timespan(self, posts: List[Dict]) -> str:
+        """Calculate the timespan of post creation."""
+        if not posts:
+            return "No posts"
+        
+        # Get timestamps
+        timestamps = []
+        for post in posts:
+            approved_at = post.get('approved_at')
+            if approved_at:
+                try:
+                    from datetime import datetime
+                    ts = datetime.fromisoformat(approved_at.replace('Z', '+00:00'))
+                    timestamps.append(ts)
+                except:
+                    continue
+        
+        if not timestamps:
+            return "Unknown"
+        
+        # Calculate timespan
+        if len(timestamps) == 1:
+            return "Single post"
+        
+        earliest = min(timestamps)
+        latest = max(timestamps)
+        diff = latest - earliest
+        
+        if diff.days > 0:
+            return f"{diff.days} day{'s' if diff.days > 1 else ''}"
+        elif diff.seconds > 3600:
+            hours = diff.seconds // 3600
+            return f"{hours} hour{'s' if hours > 1 else ''}"
+        elif diff.seconds > 60:
+            minutes = diff.seconds // 60
+            return f"{minutes} minute{'s' if minutes > 1 else ''}"
+        else:
+            return "Same time"
+    
+    def _get_tone_emoji(self, tone: str) -> str:
+        """Get emoji for tone type."""
+        tone_emojis = {
+            'Behind-the-Build': '🧩',
+            'What Broke': '💡',
+            'Finished & Proud': '🚀',
+            'Problem → Solution → Result': '🎯',
+            'Mini Lesson': '📓',
+            'Technical Deep Dive': '🔧',
+            'Different Aspects': '🔍',
+            'Different Angles': '📐',
+            'Series Continuation': '📚',
+            'Thematic Connection': '🔗',
+            'Sequential Story': '📖'
+        }
+        return tone_emojis.get(tone, '📝')
+    
+    def _create_series_navigation_keyboard(self, session: Dict):
+        """Create navigation keyboard for series management."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 Post Details", callback_data="series_post_details"),
+                InlineKeyboardButton("📤 Export Series", callback_data="series_export")
+            ],
+            [
+                InlineKeyboardButton("🔄 Refresh", callback_data="series_refresh"),
+                InlineKeyboardButton("❌ Close", callback_data="series_close")
+            ]
+        ]
+        
+        return InlineKeyboardMarkup(keyboard)
+    
+    async def _export_series(self, query, session):
+        """Export series in various formats."""
+        try:
+            # Show export options
+            export_message = """
+📤 **Export Series**
+
+Choose export format:
+
+• **Markdown** - Full series as markdown document
+• **Summary** - Text summary of all posts
+• **Airtable** - Direct link to your Airtable records
+            """
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("📄 Markdown", callback_data="export_markdown"),
+                    InlineKeyboardButton("📝 Summary", callback_data="export_summary")
+                ],
+                [
+                    InlineKeyboardButton("🔗 Airtable Link", callback_data="export_airtable"),
+                    InlineKeyboardButton("⬅️ Back", callback_data="series_refresh")
+                ]
+            ]
+            
+            from telegram import InlineKeyboardMarkup
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                export_message.strip(),
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+            
+        except Exception as e:
+            await query.edit_message_text(
+                f"❌ **Error showing export options:** {str(e)}",
+                parse_mode='Markdown'
+            )
     
     def run(self):
         """Start the bot."""
