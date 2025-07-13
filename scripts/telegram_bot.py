@@ -52,6 +52,7 @@ class FacebookContentBot:
         self.application.add_handler(CommandHandler("help", self._help_command))
         self.application.add_handler(CommandHandler("status", self._status_command))
         self.application.add_handler(CommandHandler("series", self._series_command))
+        self.application.add_handler(CommandHandler("continue", self._continue_command))
         
         # Document/file handler
         self.application.add_handler(MessageHandler(filters.Document.ALL, self._handle_document))
@@ -75,7 +76,8 @@ class FacebookContentBot:
             'session_started': datetime.now().isoformat(),
             'last_activity': datetime.now().isoformat(),
             'session_context': '',  # AI context summary for continuity
-            'post_count': 0
+            'post_count': 0,
+            'state': None # To manage multi-step commands like /continue
         }
         
         self.user_sessions[user_id] = session
@@ -243,7 +245,7 @@ Need help? Just send a markdown file to begin! 🚀
             # Send processing message
             processing_msg = await update.message.reply_text(
                 "📄 **Processing your markdown file...**\n\n"
-                "⏳ This may take a moment while I analyze the content and generate your Facebook post.",
+                "⏳ Analyzing content and preparing to generate your post...",
                 parse_mode='Markdown'
             )
             
@@ -253,53 +255,21 @@ Need help? Just send a markdown file to begin! 🚀
             markdown_content = file_content.decode('utf-8')
             
             # Initialize or update session
-            if user_id in self.user_sessions:
-                # If user already has a session, add the new file to it
-                self._add_post_to_series(user_id, {'post_content': markdown_content}, '', parent_post_id='initial_upload')
-            else:
-                # If no session, start a new one
-                self._initialize_session(user_id, markdown_content, document.file_name)
-            
-            # Generate Facebook post
-            await self._generate_and_show_post(update, context, markdown_content)
+            session = self._initialize_session(user_id, markdown_content, document.file_name)
             
             # Delete processing message
             await processing_msg.delete()
             
+            # Generate post immediately
+            await self._generate_and_show_post(update, context, markdown_content)
+            
         except Exception as e:
+            logger.error(f"Error processing document: {str(e)}")
             await update.message.reply_text(
                 f"❌ **Error processing file:** {str(e)}",
                 parse_mode='Markdown'
             )
-    
-    def _escape_markdown(self, text: str) -> str:
-        """Escape markdown characters for Telegram."""
-        if not text:
-            return text
-        
-        # Escape special markdown characters that can cause parsing errors
-        escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-        
-        for char in escape_chars:
-            text = text.replace(char, f'\\{char}')
-        
-        return text
-    
-    def _truncate_message(self, message: str, max_length: int = 4000) -> str:
-        """Truncate message if it's too long for Telegram."""
-        if len(message) <= max_length:
-            return message
-        
-        # Find a good place to truncate (try to break at word boundaries)
-        truncated = message[:max_length-50]  # Leave space for truncation notice
-        
-        # Try to break at the last complete word
-        last_space = truncated.rfind(' ')
-        if last_space > max_length - 200:  # Only if we don't cut too much
-            truncated = truncated[:last_space]
-        
-        return truncated + "\n\n📝 *[Message truncated - full content saved to Airtable]*"
-    
+
     async def _generate_and_show_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
                                      markdown_content: str, tone_preference: Optional[str] = None,
                                      is_regeneration: bool = False, relationship_type: Optional[str] = None,
@@ -331,7 +301,7 @@ Need help? Just send a markdown file to begin! 🚀
             else:
                 post_data = self.ai_generator.generate_facebook_post(
                     markdown_content, 
-                    tone_preference,
+                    user_tone_preference=tone_preference,
                     session_context=session_context,
                     previous_posts=previous_posts,
                     relationship_type=relationship_type,
@@ -406,7 +376,8 @@ What would you like to do?
             try:
                 await update.message.reply_text(
                     post_preview,
-                    reply_markup=reply_markup
+                    reply_markup=reply_markup,
+                    parse_mode='MarkdownV2'
                 )
             except Exception as telegram_error:
                 # If Telegram fails, try without reply_markup
@@ -1322,67 +1293,59 @@ What would you like to do?
         )
     
     async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle text messages."""
+        """Handle plain text messages, checking for session states."""
         user_id = update.effective_user.id
-        text = update.message.text.lower().strip()
+        text = update.message.text
         
-        # Check if user has an active session and is responding to "generate another post"
-        if user_id in self.user_sessions and text in ['yes', 'y', 'sure', 'okay', 'ok']:
-            session = self.user_sessions[user_id]
-            
-            # Check if they just approved a post (have posts in series)
-            if session.get('post_count', 0) > 0:
-                # Simulate a callback query for generate_another
-                try:
-                    await update.message.reply_text(
-                        "🔄 **Generating another post from your project...**\n\n"
-                        "⏳ Creating a new perspective on your content...",
-                        parse_mode='Markdown'
-                    )
-                    
-                    # Use the AI generator's suggestion system for relationship type
-                    previous_posts = session.get('posts', [])
-                    suggested_relationship = self.ai_generator.suggest_relationship_type(
-                        previous_posts, 
-                        session['original_markdown']
-                    )
-                    
-                    # Generate with full context awareness
-                    markdown_content = session['original_markdown']
-                    session_context = session.get('session_context', '')
-                    
-                    post_data = self.ai_generator.generate_facebook_post(
-                        markdown_content,
-                        user_tone_preference=None,  # Let AI decide based on context
-                        session_context=session_context,
-                        previous_posts=previous_posts,
-                        relationship_type=suggested_relationship
-                    )
-                    
-                    # Store the new draft
-                    session['current_draft'] = post_data
-                    session['last_activity'] = datetime.now().isoformat()
-                    
-                    # Show the new post as a new message
-                    await self._send_new_post_message_from_update(update, post_data, session)
-                    return
-                    
-                except Exception as e:
-                    await update.message.reply_text(
-                        f"❌ **Error generating another post:** {str(e)}"
-                    )
-                    return
+        session = self.user_sessions.get(user_id)
         
-        # Default response for other text messages
+        if session and session.get('state') == 'awaiting_continuation_input':
+            await self._handle_continuation_post(update, context, text)
+        else:
+            # Default behavior for unexpected text
+            await update.message.reply_text(
+                "Thanks for your message! If you want to generate a post, please send me a `.md` file. "
+                "Use `/help` to see all commands.",
+                parse_mode='Markdown'
+            )
+
+    async def _handle_continuation_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE, previous_post_text: str):
+        """Process the pasted post text to generate a continuation."""
+        user_id = update.effective_user.id
+        session = self.user_sessions[user_id]
+        
         await update.message.reply_text(
-            "👋 Hi! I work with markdown files.\n\n"
-            "📄 **Send me a `.md` file** to generate a Facebook post!\n\n"
-            "Use `/help` for more information.",
+            "⏳ Analyzing your post and generating a follow-up... this might take a moment.",
             parse_mode='Markdown'
         )
-    
+        
+        try:
+            # This will be implemented in the next step
+            # For now, it's a placeholder
+            post_data = await asyncio.to_thread(
+                self.ai_generator.generate_continuation_post,
+                previous_post_text,
+                audience_type=session.get('audience_type', 'business') # Default to business
+            )
+
+            # Reset state after processing
+            session['state'] = None
+            
+            # Use existing methods to show the post and get feedback
+            # We need to adapt the session object slightly for this
+            session['current_draft'] = post_data
+            await self._send_new_post_message_from_update(update, post_data, session)
+
+        except Exception as e:
+            logger.error(f"Error generating continuation post: {e}", exc_info=True)
+            await update.message.reply_text(
+                f"❌ An error occurred while generating the follow-up post: {e}",
+                parse_mode='Markdown'
+            )
+            session['state'] = None
+
     async def _send_new_post_message_from_update(self, update: Update, post_data: Dict, session: Dict):
-        """Send a new message with the generated post from an update (preserves previous messages)."""
+        """Helper to send a new post message from an Update object."""
         # Create inline keyboard for the new post
         keyboard = [
             [
@@ -1497,6 +1460,32 @@ What would you like to do?
             self._truncate_message(post_preview),
             reply_markup=reply_markup
         )
+    
+    def _escape_markdown(self, text: str) -> str:
+        """Escape markdown characters for Telegram."""
+        if not text:
+            return text
+        
+        # In MarkdownV2, only these characters need escaping outside of pre/code blocks
+        # and URLs. This is a simplified approach.
+        escape_chars_v2 = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+
+        for char in escape_chars_v2:
+            text = text.replace(char, f'\\{char}')
+        
+        return text
+    
+    def _truncate_message(self, message: str, max_length: int = 4000) -> str:
+        """Truncate message if it's too long for Telegram."""
+        if len(message) <= max_length:
+            return message
+        
+        # Truncate the message to the maximum length allowed by Telegram
+        # Telegram's MarkdownV2 has a limit of 4096 characters for messages.
+        # We need to ensure we don't exceed this limit.
+        # The original code had a max_length of 2000, but Telegram's limit is 4096.
+        # Let's use 4000 as a safe truncation point.
+        return message[:max_length] + "\n\n📝 *[Content truncated for display - full version saved to Airtable]*."
     
     async def _series_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /series command to show series overview."""
@@ -1868,6 +1857,22 @@ Choose export format:
         except Exception as e:
             logger.error(f"Error starting bot: {e}")
             raise
+
+    async def _continue_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /continue command for content continuation."""
+        user_id = update.effective_user.id
+        
+        # Ensure a session exists or create a placeholder
+        if user_id not in self.user_sessions:
+            self.user_sessions[user_id] = {'state': None}
+
+        self.user_sessions[user_id]['state'] = 'awaiting_continuation_input'
+        
+        await update.message.reply_text(
+            "📝 **Content Continuation**\n\n"
+            "Please paste the full text of the Facebook post you want to continue. I'll analyze it and generate a natural follow-up for you.",
+            parse_mode='Markdown'
+        )
 
 if __name__ == "__main__":
     bot = FacebookContentBot()

@@ -3,3 +3,76 @@ description:
 globs:
 alwaysApply: false
 ---
+# Brand Tone Guidelines
+
+## 🧩 1. "Behind-the-Build"
+
+- Casual and curious
+- Share the story of what was built, including effort and surprises
+- Use "I built this with Cursor AI…" or "It started as…"
+- Highlight time spent, learning, and human moments
+
+**Example Hook:**
+"Built this with Cursor AI over the weekend..."
+
+---
+
+## 💡 2. "What Broke"
+
+- Center the story around a mistake, bug, or failure
+- Explain what broke, why it happened, how you fixed it
+- Add humor or reflection (e.g., "It's always the small things")
+- Use lines like: "I broke something I built. And I loved it."
+
+**Example Hook:**
+"I broke something I built. And I loved it."
+
+---
+
+## 🚀 3. "Finished & Proud"
+
+- Announce that the build is complete
+- List 2–3 features it now does
+- Explain the initial motivation
+- Use phrases like "Just shipped this automation" or "It's now part of my workflow"
+
+**Example Hook:**
+"Just shipped this automation..."
+
+---
+
+## 🎯 4. "Problem → Solution → Result"
+
+- Clearly define a real-world pain point
+- Describe the build and how it solves the problem
+- Quantify the result (e.g., "saved 3 hours weekly")
+- CTA: "Want a copy of this setup?" or "DM me to try it"
+
+**Example Structure:**
+Problem: X
+Solution: Y
+Result: Z
+
+---
+
+## 📓 5. "Mini Lesson"
+
+- Philosophical or motivational
+- Use a build to explain a larger principle (e.g., clarity, simplicity, peace of mind)
+- Use lines like: "Automation isn't about replacing people. It's about removing friction."
+
+**Example Hook:**
+"Automation isn't about replacing people. It's about removing friction."
+
+---
+
+## Style Guidelines
+
+- Keep tone casual, reflective, builder-focused
+- Do not oversell or sound corporate
+- Show the human side of the work
+- Use emojis naturally (not overloaded)
+- Short paragraphs (2-3 lines)
+- Strong line breaks for readability
+- Personal, relatable voice (building in public)
+- End with insight, CTA, or reflection
