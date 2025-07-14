@@ -165,7 +165,7 @@ Just send me a markdown file! 📄
 🎯 **AI Facebook Content Generator Help**
 
 **How to use:**
-1. **Send a markdown file** (.md extension)
+1. **Send a markdown file** (.md or .mdc extension)
 2. **Choose a tone** (optional) or let AI decide
 3. **Review the generated post**
 4. **Approve** ✅ or **Regenerate** 🔄
@@ -178,7 +178,7 @@ Just send me a markdown file! 📄
 • 📓 Mini Lesson
 
 **File Requirements:**
-• `.md` file extension
+• `.md` or `.mdc` file extension
 • Max size: 10MB
 • Text content about your automation/AI projects
 
@@ -227,9 +227,9 @@ Need help? Just send a markdown file to begin! 🚀
         user_id = update.effective_user.id
         
         # Validate file
-        if not document.file_name.endswith('.md'):
+        if not (document.file_name.endswith('.md') or document.file_name.endswith('.mdc')):
             await update.message.reply_text(
-                "❌ Please send a `.md` (Markdown) file only.",
+                "❌ Please send a `.md` or `.mdc` (Markdown) file only.",
                 parse_mode='Markdown'
             )
             return
@@ -324,17 +324,13 @@ Need help? Just send a markdown file to begin! 🚀
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # Get post content and ensure it's not too long
+            # Get post content and ensure it's not too long - NO ESCAPING
             post_content = post_data.get('post_content', 'No content generated')
             tone_reason = post_data.get('tone_reason', 'No reason provided')
             
-            # Escape markdown characters to prevent Telegram parsing errors
-            post_content = self._escape_markdown(post_content)
-            tone_reason = self._escape_markdown(tone_reason)
-            
             # Truncate content if needed for Telegram display
             if len(post_content) > 2000:  # Leave room for other message parts
-                display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display - full version saved to Airtable]*"
+                display_content = post_content[:2000] + "\n\n📝 [Content truncated for display - full version saved to Airtable]"
             else:
                 display_content = post_content
             
@@ -347,15 +343,14 @@ Need help? Just send a markdown file to begin! 🚀
             # Add context-aware information to the display
             context_info = ""
             if post_data.get('is_context_aware', False):
-                context_info = f"\n\n🔗 **Context-Aware Generation**"
+                context_info = f"\n\n🔗 Context-Aware Generation"
                 if relationship_type:
                     context_info += f"\n• Relationship: {relationship_type}"
                 if previous_posts:
                     context_info += f"\n• Building on {len(previous_posts)} previous posts"
             
-            # Format the message
-            post_preview = f"""
-🎯 Generated Facebook Post
+            # Format the message - PLAIN TEXT
+            post_preview = f"""🎯 Generated Facebook Post
 
 Tone Used: {post_data.get('tone_used', 'Unknown')}{context_info}
 
@@ -366,18 +361,16 @@ Content:
 
 AI Reasoning: {display_reason}
 
-What would you like to do?
-            """
+What would you like to do?"""
             
             # Final safety check and truncation
             post_preview = self._truncate_message(post_preview)
             
-            # Send the message with better error handling
+            # Send the message with plain text (no parse_mode)
             try:
                 await update.message.reply_text(
                     post_preview,
-                    reply_markup=reply_markup,
-                    parse_mode='MarkdownV2'
+                    reply_markup=reply_markup
                 )
             except Exception as telegram_error:
                 # If Telegram fails, try without reply_markup
@@ -395,7 +388,7 @@ What would you like to do?
             logger.error(f"Error in _generate_and_show_post: {str(e)}")
             try:
                 await update.message.reply_text(
-                    f"❌ **Error generating post:** {str(e)}"
+                    f"❌ Error generating post: {str(e)}"
                 )
             except Exception:
                 # If even error message fails, log it
@@ -452,6 +445,35 @@ What would you like to do?
             await query.edit_message_text(
                 "❌ **Series Overview Closed.**\n\n"
                 "Send a new markdown file to start a fresh content series! 📄",
+                parse_mode='Markdown'
+            )
+        elif action == "series_manage_posts":
+            await self._show_post_management(query, user_id)
+        elif action.startswith("export_"):
+            # Handle export actions
+            await self._handle_export_action(query, user_id, action)
+        elif action.startswith("post_"):
+            # Handle individual post actions
+            await self._handle_post_action(query, user_id, action)
+            
+    async def _handle_export_action(self, query, user_id: int, action: str):
+        """Handle export actions for series data."""
+        if user_id not in self.user_sessions:
+            await query.edit_message_text("❌ Session expired. Please upload a new file.")
+            return
+        
+        session = self.user_sessions[user_id]
+        
+        try:
+            if action == "export_markdown":
+                await self._export_markdown(query, session)
+            elif action == "export_summary":
+                await self._export_summary(query, session)
+            elif action == "export_airtable":
+                await self._export_airtable_link(query, session)
+        except Exception as e:
+            await query.edit_message_text(
+                f"❌ **Error exporting series:** {str(e)}",
                 parse_mode='Markdown'
             )
     
@@ -538,13 +560,20 @@ What would you like to do?
             session_context = session.get('session_context', '')
             previous_posts = session.get('posts', [])
             
-            # Regenerate with context awareness
+            # BUGFIX: Extract relationship context from current_draft to preserve follow-up classification
+            current_draft = session.get('current_draft', {})
+            relationship_type = current_draft.get('relationship_type')
+            parent_post_id = current_draft.get('parent_post_id')
+            
+            # Regenerate with context awareness AND relationship preservation
             markdown_content = session['original_markdown'] 
             post_data = self.ai_generator.regenerate_post(
                 markdown_content,
                 feedback="User requested regeneration - try different tone or approach",
                 session_context=session_context,
-                previous_posts=previous_posts
+                previous_posts=previous_posts,
+                relationship_type=relationship_type,  # Now preserved
+                parent_post_id=parent_post_id        # Now preserved
             )
             
             session['current_draft'] = post_data
@@ -566,13 +595,9 @@ What would you like to do?
             post_content = post_data.get('post_content', 'No content generated')
             tone_reason = post_data.get('tone_reason', 'No reason provided')
             
-            # Escape markdown characters to prevent Telegram parsing errors
-            post_content = self._escape_markdown(post_content)
-            tone_reason = self._escape_markdown(tone_reason)
-            
             # Truncate content if needed for Telegram display
             if len(post_content) > 2000:
-                display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display]*"
+                display_content = post_content[:2000] + "\n\n📝 [Content truncated for display]"
             else:
                 display_content = post_content
             
@@ -585,13 +610,15 @@ What would you like to do?
             # Add context-aware information
             context_info = ""
             if post_data.get('is_context_aware', False):
-                context_info = f"\n\n🔗 **Context-Aware Regeneration**"
+                context_info = f"\n\n🔗 Context-Aware Regeneration"
                 if previous_posts:
                     context_info += f"\n• Building on {len(previous_posts)} previous posts"
+                # Show relationship type if it was preserved
+                if post_data.get('relationship_type'):
+                    context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
             
-            # Format the message
-            post_preview = f"""
-🔄 **Regenerated Post**
+            # Format the message - PLAIN TEXT
+            post_preview = f"""🔄 **Regenerated Post**
 
 **Tone:** {post_data.get('tone_used', 'Unknown')}{context_info}
 
@@ -602,8 +629,7 @@ What would you like to do?
 
 **AI Reasoning:** {display_reason}
 
-What would you like to do?
-            """
+What would you like to do?"""
             
             await query.edit_message_text(
                 self._truncate_message(post_preview),
@@ -671,14 +697,21 @@ What would you like to do?
             session_context = session.get('session_context', '')
             previous_posts = session.get('posts', [])
             
-            # Regenerate with specific tone and context awareness
+            # BUGFIX: Extract relationship context from current_draft to preserve follow-up classification
+            current_draft = session.get('current_draft', {})
+            relationship_type = current_draft.get('relationship_type')
+            parent_post_id = current_draft.get('parent_post_id')
+            
+            # Regenerate with specific tone and context awareness AND relationship preservation
             markdown_content = session['original_markdown']
             post_data = self.ai_generator.regenerate_post(
                 markdown_content,
                 feedback=f"User specifically requested {selected_tone} tone",
                 tone_preference=selected_tone,
                 session_context=session_context,
-                previous_posts=previous_posts
+                previous_posts=previous_posts,
+                relationship_type=relationship_type,  # Now preserved
+                parent_post_id=parent_post_id        # Now preserved
             )
             
             session['current_draft'] = post_data
@@ -700,13 +733,9 @@ What would you like to do?
             post_content = post_data.get('post_content', 'No content generated')
             tone_reason = post_data.get('tone_reason', 'No reason provided')
             
-            # Escape markdown characters to prevent Telegram parsing errors
-            post_content = self._escape_markdown(post_content)
-            tone_reason = self._escape_markdown(tone_reason)
-            
             # Truncate content if needed for Telegram display
             if len(post_content) > 2000:
-                display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display]*"
+                display_content = post_content[:2000] + "\n\n📝 [Content truncated for display]"
             else:
                 display_content = post_content
             
@@ -719,13 +748,15 @@ What would you like to do?
             # Add context-aware information
             context_info = ""
             if post_data.get('is_context_aware', False):
-                context_info = f"\n\n🔗 **Context-Aware Regeneration**"
+                context_info = f"\n\n🔗 Context-Aware Regeneration"
                 if previous_posts:
                     context_info += f"\n• Building on {len(previous_posts)} previous posts"
+                # Show relationship type if it was preserved
+                if post_data.get('relationship_type'):
+                    context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
             
-            # Format the message
-            post_preview = f"""
-🎨 **Regenerated with {selected_tone} Tone**
+            # Format the message - PLAIN TEXT
+            post_preview = f"""🎨 **Regenerated with {selected_tone} Tone**
 
 **Content:**
 ───────────────────────────
@@ -734,8 +765,7 @@ What would you like to do?
 
 **AI Reasoning:** {display_reason}{context_info}
 
-What would you like to do?
-            """
+What would you like to do?"""
             
             await query.edit_message_text(
                 self._truncate_message(post_preview),
@@ -1157,13 +1187,9 @@ Ready to generate your new post?
         post_content = post_data.get('post_content', 'No content generated')
         tone_reason = post_data.get('tone_reason', 'No reason provided')
         
-        # Escape markdown characters to prevent Telegram parsing errors
-        post_content = self._escape_markdown(post_content)
-        tone_reason = self._escape_markdown(tone_reason)
-        
         # Truncate content if needed for Telegram display
         if len(post_content) > 2000:
-            display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display]*"
+            display_content = post_content[:2000] + "\n\n📝 [Content truncated for display]"
         else:
             display_content = post_content
         
@@ -1176,15 +1202,14 @@ Ready to generate your new post?
         # Add context-aware information
         context_info = ""
         if post_data.get('is_context_aware', False):
-            context_info = f"\n\n🔗 **Context-Aware Generation**"
+            context_info = f"\n\n🔗 Context-Aware Generation"
             if post_data.get('relationship_type'):
                 context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
             if session.get('posts'):
                 context_info += f"\n• Building on {len(session.get('posts', []))} previous posts"
         
-        # Create the message
-        post_preview = f"""
-🎯 **New Post Generated (#{session['post_count'] + 1})**
+        # Create the message - PLAIN TEXT
+        post_preview = f"""🎯 **New Post Generated (#{session['post_count'] + 1})**
 
 **Tone:** {post_data.get('tone_used', 'Unknown')}{context_info}
 
@@ -1195,8 +1220,7 @@ Ready to generate your new post?
 
 **AI Reasoning:** {display_reason}
 
-What would you like to do?
-        """
+What would you like to do?"""
         
         await query.edit_message_text(
             self._truncate_message(post_preview),
@@ -1222,12 +1246,9 @@ What would you like to do?
         post_content = post_data.get('post_content', 'No content generated')
         tone_reason = post_data.get('tone_reason', 'No reason provided')
         
-        # Escape and truncate content
-        post_content = self._escape_markdown(post_content)
-        tone_reason = self._escape_markdown(tone_reason)
-        
+        # Truncate content if needed for Telegram display
         if len(post_content) > 2000:
-            display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display]*"
+            display_content = post_content[:2000] + "\n\n📝 [Content truncated for display]"
         else:
             display_content = post_content
         
@@ -1239,15 +1260,14 @@ What would you like to do?
         # Add context-aware information
         context_info = ""
         if post_data.get('is_context_aware', False):
-            context_info = f"\n\n🔗 **Context-Aware Generation**"
+            context_info = f"\n\n🔗 Context-Aware Generation"
             if post_data.get('relationship_type'):
                 context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
             if session.get('posts'):
                 context_info += f"\n• Building on {len(session.get('posts', []))} previous posts"
         
-        # Create the message
-        post_preview = f"""
-🔄 **New Post Generated \\(#{session['post_count'] + 1}\\)**
+        # Create the message - PLAIN TEXT
+        post_preview = f"""🔄 **New Post Generated (#{session['post_count'] + 1})**
 
 **Tone:** {post_data.get('tone_used', 'Unknown')}{context_info}
 
@@ -1258,8 +1278,7 @@ What would you like to do?
 
 **AI Reasoning:** {display_reason}
 
-What would you like to do?
-        """
+What would you like to do?"""
         
         await query.message.reply_text(
             self._truncate_message(post_preview),
@@ -1363,12 +1382,9 @@ What would you like to do?
         post_content = post_data.get('post_content', 'No content generated')
         tone_reason = post_data.get('tone_reason', 'No reason provided')
         
-        # Escape and truncate content
-        post_content = self._escape_markdown(post_content)
-        tone_reason = self._escape_markdown(tone_reason)
-        
+        # Truncate content if needed for Telegram display
         if len(post_content) > 2000:
-            display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display]*"
+            display_content = post_content[:2000] + "\n\n📝 [Content truncated for display]"
         else:
             display_content = post_content
         
@@ -1380,15 +1396,14 @@ What would you like to do?
         # Add context-aware information
         context_info = ""
         if post_data.get('is_context_aware', False):
-            context_info = f"\n\n🔗 **Context-Aware Generation**"
+            context_info = f"\n\n🔗 Context-Aware Generation"
             if post_data.get('relationship_type'):
                 context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
             if session.get('posts'):
                 context_info += f"\n• Building on {len(session.get('posts', []))} previous posts"
         
-        # Create the message
-        post_preview = f"""
-🔄 **New Post Generated \\(#{session['post_count'] + 1}\\)**
+        # Create the message - PLAIN TEXT
+        post_preview = f"""🔄 **New Post Generated (#{session['post_count'] + 1})**
 
 **Tone:** {post_data.get('tone_used', 'Unknown')}{context_info}
 
@@ -1399,8 +1414,7 @@ What would you like to do?
 
 **AI Reasoning:** {display_reason}
 
-What would you like to do?
-        """
+What would you like to do?"""
         
         await update.message.reply_text(
             self._truncate_message(post_preview),
@@ -1426,12 +1440,9 @@ What would you like to do?
         post_content = post_data.get('post_content', 'No content generated')
         tone_reason = post_data.get('tone_reason', 'No reason provided')
         
-        # Escape and truncate content
-        post_content = self._escape_markdown(post_content)
-        tone_reason = self._escape_markdown(tone_reason)
-        
+        # Truncate content if needed for Telegram display
         if len(post_content) > 2000:
-            display_content = post_content[:2000] + "\n\n📝 *[Content truncated for display]*"
+            display_content = post_content[:2000] + "\n\n📝 [Content truncated for display]"
         else:
             display_content = post_content
         
@@ -1440,9 +1451,8 @@ What would you like to do?
         else:
             display_reason = tone_reason
         
-        # Create the message
-        post_preview = f"""
-🔄 **New Post Generated \\(#{session['post_count'] + 1}\\)**
+        # Create the message - PLAIN TEXT
+        post_preview = f"""🔄 **New Post Generated (#{session['post_count'] + 1})**
 
 **Tone:** {post_data.get('tone_used', 'Unknown')}
 
@@ -1453,8 +1463,7 @@ What would you like to do?
 
 **AI Reasoning:** {display_reason}
 
-What would you like to do?
-        """
+What would you like to do?"""
         
         await update.message.reply_text(
             self._truncate_message(post_preview),
@@ -1462,18 +1471,26 @@ What would you like to do?
         )
     
     def _escape_markdown(self, text: str) -> str:
-        """Escape markdown characters for Telegram."""
+        """Escape markdown characters for Telegram (idempotent version)."""
         if not text:
             return text
         
-        # In MarkdownV2, only these characters need escaping outside of pre/code blocks
-        # and URLs. This is a simplified approach.
+        # Characters that need escaping for Telegram MarkdownV2
         escape_chars_v2 = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-
-        for char in escape_chars_v2:
-            text = text.replace(char, f'\\{char}')
         
-        return text
+        # Check if text is already escaped by looking for escaped characters
+        # If we find any escaped characters, assume the text is already escaped
+        for char in escape_chars_v2:
+            if f'\\{char}' in text:
+                # Text appears to be already escaped, return as-is
+                return text
+        
+        # Text is not escaped, apply escaping
+        escaped_text = text
+        for char in escape_chars_v2:
+            escaped_text = escaped_text.replace(char, f'\\{char}')
+        
+        return escaped_text
     
     def _truncate_message(self, message: str, max_length: int = 4000) -> str:
         """Truncate message if it's too long for Telegram."""
@@ -1485,7 +1502,7 @@ What would you like to do?
         # We need to ensure we don't exceed this limit.
         # The original code had a max_length of 2000, but Telegram's limit is 4096.
         # Let's use 4000 as a safe truncation point.
-        return message[:max_length] + "\n\n📝 *[Content truncated for display - full version saved to Airtable]*."
+        return message[:max_length] + "\n\n📝 [Content truncated for display - full version saved to Airtable]."
     
     async def _series_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /series command to show series overview."""
@@ -1785,16 +1802,30 @@ What would you like to do?
         """Create navigation keyboard for series management."""
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         
+        posts = session.get('posts', [])
+        
+        # Create keyboard with post management options
         keyboard = [
             [
                 InlineKeyboardButton("📊 Post Details", callback_data="series_post_details"),
                 InlineKeyboardButton("📤 Export Series", callback_data="series_export")
-            ],
-            [
-                InlineKeyboardButton("🔄 Refresh", callback_data="series_refresh"),
-                InlineKeyboardButton("❌ Close", callback_data="series_close")
             ]
         ]
+        
+        # Add individual post management if posts exist
+        if posts:
+            keyboard.append([
+                InlineKeyboardButton("🔧 Manage Posts", callback_data="series_manage_posts"),
+                InlineKeyboardButton("🔄 Refresh", callback_data="series_refresh")
+            ])
+        else:
+            keyboard.append([
+                InlineKeyboardButton("🔄 Refresh", callback_data="series_refresh")
+            ])
+        
+        keyboard.append([
+            InlineKeyboardButton("❌ Close", callback_data="series_close")
+        ])
         
         return InlineKeyboardMarkup(keyboard)
     
@@ -1838,6 +1869,130 @@ Choose export format:
                 parse_mode='Markdown'
             )
     
+    async def _export_markdown(self, query, session):
+        """Export series as markdown document."""
+        posts = session.get('posts', [])
+        filename = session.get('filename', 'series')
+        series_id = session.get('series_id', 'unknown')[:8]
+        
+        # Create markdown content
+        markdown_content = f"# {filename.replace('.md', '').replace('_', ' ').title()}\n\n"
+        markdown_content += f"**Series ID:** {series_id}...\n"
+        markdown_content += f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        markdown_content += f"**Total Posts:** {len(posts)}\n\n"
+        
+        # Add series structure
+        markdown_content += "## Series Structure\n\n"
+        for i, post in enumerate(posts, 1):
+            markdown_content += f"### Post {i}: {post['tone_used']}\n"
+            if post.get('relationship_type'):
+                markdown_content += f"**Relationship:** {post['relationship_type']}\n"
+            if post.get('parent_post_id'):
+                markdown_content += f"**Builds on:** Post {post['parent_post_id']}\n"
+            markdown_content += f"**Approved:** {post.get('approved_at', 'Unknown')}\n\n"
+            markdown_content += f"{post['content']}\n\n"
+            markdown_content += "---\n\n"
+        
+        # Add original markdown source
+        markdown_content += "## Original Source\n\n"
+        markdown_content += f"```markdown\n{session.get('original_markdown', '')}\n```\n"
+        
+        # Send as file
+        from io import BytesIO
+        file_buffer = BytesIO(markdown_content.encode('utf-8'))
+        file_buffer.name = f"series_{series_id}.md"
+        
+        await query.message.reply_document(
+            document=file_buffer,
+            caption="📄 **Series exported as Markdown**\n\nComplete series with all posts and metadata.",
+            parse_mode='Markdown'
+        )
+        
+        # Return to series overview
+        await self._show_series_overview(query, None)
+    
+    async def _export_summary(self, query, session):
+        """Export series as text summary."""
+        posts = session.get('posts', [])
+        filename = session.get('filename', 'series')
+        series_id = session.get('series_id', 'unknown')[:8]
+        
+        # Create summary content
+        summary_content = f"📊 SERIES SUMMARY: {filename.replace('.md', '').replace('_', ' ').title()}\n"
+        summary_content += f"Series ID: {series_id}...\n"
+        summary_content += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        summary_content += f"Total Posts: {len(posts)}\n\n"
+        
+        # Add post summaries
+        for i, post in enumerate(posts, 1):
+            summary_content += f"📝 POST {i}: {post['tone_used']}\n"
+            if post.get('relationship_type'):
+                summary_content += f"   🔗 Relationship: {post['relationship_type']}\n"
+            if post.get('parent_post_id'):
+                summary_content += f"   📋 Builds on: Post {post['parent_post_id']}\n"
+            summary_content += f"   📅 Created: {post.get('approved_at', 'Unknown')}\n"
+            summary_content += f"   📄 Content: {post.get('content_summary', 'No summary')}\n\n"
+        
+        # Add statistics
+        stats = self._calculate_series_statistics(posts)
+        summary_content += f"📈 STATISTICS:\n"
+        summary_content += f"   • Most Used Tone: {stats['most_used_tone']}\n"
+        summary_content += f"   • Creation Timespan: {stats['creation_timespan']}\n"
+        summary_content += f"   • Relationship Types: {', '.join(stats['relationship_types_used']) if stats['relationship_types_used'] else 'None'}\n"
+        
+        # Send as file
+        from io import BytesIO
+        file_buffer = BytesIO(summary_content.encode('utf-8'))
+        file_buffer.name = f"series_summary_{series_id}.txt"
+        
+        await query.message.reply_document(
+            document=file_buffer,
+            caption="📝 **Series exported as Summary**\n\nQuick overview of all posts and statistics.",
+            parse_mode='Markdown'
+        )
+        
+        # Return to series overview
+        await self._show_series_overview(query, None)
+    
+    async def _export_airtable_link(self, query, session):
+        """Export series as Airtable link."""
+        posts = session.get('posts', [])
+        series_id = session.get('series_id', 'unknown')
+        
+        # Create Airtable link message
+        airtable_message = f"""
+🔗 **Airtable Records for Series**
+
+**Series ID:** {series_id[:8]}...
+**Base ID:** {self.config.airtable_base_id}
+**Table:** {self.config.airtable_table_name}
+
+**Direct Records:**
+"""
+        
+        for i, post in enumerate(posts, 1):
+            record_id = post.get('airtable_record_id', 'Unknown')
+            airtable_message += f"• Post {i}: https://airtable.com/{self.config.airtable_base_id}/{record_id}\n"
+        
+        airtable_message += f"""
+**View All Records:**
+https://airtable.com/{self.config.airtable_base_id}
+
+**Filter by Series ID:**
+Use filter: `Post Series ID = {series_id}`
+        """
+        
+        await query.edit_message_text(
+            airtable_message.strip(),
+            parse_mode='Markdown'
+        )
+        
+        # Add back button
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Series", callback_data="series_refresh")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_reply_markup(reply_markup=reply_markup)
+    
     def run(self):
         """Start the bot."""
         try:
@@ -1872,6 +2027,323 @@ Choose export format:
             "📝 **Content Continuation**\n\n"
             "Please paste the full text of the Facebook post you want to continue. I'll analyze it and generate a natural follow-up for you.",
             parse_mode='Markdown'
+        )
+    
+    async def _handle_post_action(self, query, user_id: int, action: str):
+        """Handle individual post actions like delete, edit, regenerate."""
+        if user_id not in self.user_sessions:
+            await query.edit_message_text("❌ Session expired. Please upload a new file.")
+            return
+        
+        session = self.user_sessions[user_id]
+        
+        try:
+            if action.startswith("post_delete_"):
+                post_id = int(action.replace("post_delete_", ""))
+                await self._delete_post(query, session, post_id)
+            elif action.startswith("post_regenerate_"):
+                post_id = int(action.replace("post_regenerate_", ""))
+                await self._regenerate_individual_post(query, session, post_id)
+            elif action.startswith("post_view_"):
+                post_id = int(action.replace("post_view_", ""))
+                await self._view_individual_post(query, session, post_id)
+            elif action == "post_confirm_delete":
+                await self._confirm_delete_post(query, session)
+            elif action == "post_cancel_delete":
+                await self._cancel_delete_post(query, session)
+        except Exception as e:
+            await query.edit_message_text(
+                f"❌ **Error managing post:** {str(e)}",
+                parse_mode='Markdown'
+            )
+    
+    async def _delete_post(self, query, session, post_id: int):
+        """Delete a post from the series."""
+        posts = session.get('posts', [])
+        post_to_delete = None
+        
+        for post in posts:
+            if post['post_id'] == post_id:
+                post_to_delete = post
+                break
+        
+        if not post_to_delete:
+            await query.edit_message_text("❌ Post not found.")
+            return
+        
+        # Store deletion context in session
+        session['pending_delete'] = {
+            'post_id': post_id,
+            'post_data': post_to_delete
+        }
+        
+        # Show confirmation
+        confirmation_message = f"""
+⚠️ **Confirm Post Deletion**
+
+**Post {post_id}:** {post_to_delete['tone_used']}
+**Content:** {post_to_delete.get('content_summary', 'No summary')}
+**Created:** {post_to_delete.get('approved_at', 'Unknown')}
+
+**Warning:** This action cannot be undone. The post will be removed from your series and marked as deleted in Airtable.
+
+Are you sure you want to delete this post?
+        """
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🗑️ Yes, Delete", callback_data="post_confirm_delete"),
+                InlineKeyboardButton("❌ Cancel", callback_data="post_cancel_delete")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            confirmation_message.strip(),
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+    
+    async def _confirm_delete_post(self, query, session):
+        """Confirm and execute post deletion."""
+        pending_delete = session.get('pending_delete')
+        if not pending_delete:
+            await query.edit_message_text("❌ No pending deletion found.")
+            return
+        
+        post_id = pending_delete['post_id']
+        post_data = pending_delete['post_data']
+        
+        # Remove from session
+        posts = session.get('posts', [])
+        session['posts'] = [p for p in posts if p['post_id'] != post_id]
+        session['post_count'] -= 1
+        
+        # Update Airtable record to mark as deleted
+        try:
+            record_id = post_data.get('airtable_record_id')
+            if record_id:
+                self.airtable.airtable.update(record_id, {
+                    'Review Status': '🗑️ Deleted',
+                    'AI Notes or Edits': f"Post deleted from series on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                })
+        except Exception as e:
+            logger.warning(f"Failed to update Airtable record: {e}")
+        
+        # Clear pending deletion
+        del session['pending_delete']
+        
+        # Update session context
+        self._update_session_context(query.from_user.id)
+        
+        await query.edit_message_text(
+            f"✅ **Post {post_id} deleted successfully**\n\n"
+            f"The post has been removed from your series and marked as deleted in Airtable.",
+            parse_mode='Markdown'
+        )
+        
+        # Return to series overview after 2 seconds
+        await asyncio.sleep(2)
+        await self._show_series_overview(query, None)
+    
+    async def _cancel_delete_post(self, query, session):
+        """Cancel post deletion."""
+        if 'pending_delete' in session:
+            del session['pending_delete']
+        
+        await query.edit_message_text(
+            "❌ **Post deletion cancelled**\n\n"
+            "No changes were made to your series.",
+            parse_mode='Markdown'
+        )
+        
+        # Return to series overview
+        await asyncio.sleep(1)
+        await self._show_series_overview(query, None)
+    
+    async def _regenerate_individual_post(self, query, session, post_id: int):
+        """Regenerate a specific post from the series."""
+        posts = session.get('posts', [])
+        post_to_regenerate = None
+        
+        for post in posts:
+            if post['post_id'] == post_id:
+                post_to_regenerate = post
+                break
+        
+        if not post_to_regenerate:
+            await query.edit_message_text("❌ Post not found.")
+            return
+        
+        await query.edit_message_text(
+            f"🔄 **Regenerating Post {post_id}...**\n\n"
+            "⏳ Creating a new version while preserving context...",
+            parse_mode='Markdown'
+        )
+        
+        # Regenerate the post with same context
+        try:
+            # Get context for regeneration
+            session_context = session.get('session_context', '')
+            previous_posts = session.get('posts', [])
+            
+            # Create a mock current_draft to preserve context
+            session['current_draft'] = {
+                'relationship_type': post_to_regenerate.get('relationship_type'),
+                'parent_post_id': post_to_regenerate.get('parent_post_id')
+            }
+            
+            markdown_content = session['original_markdown']
+            post_data = self.ai_generator.regenerate_post(
+                markdown_content,
+                feedback=f"User requested regeneration of Post {post_id}",
+                session_context=session_context,
+                previous_posts=previous_posts,
+                relationship_type=post_to_regenerate.get('relationship_type'),
+                parent_post_id=post_to_regenerate.get('parent_post_id')
+            )
+            
+            # Update the post in the series
+            for i, post in enumerate(posts):
+                if post['post_id'] == post_id:
+                    posts[i].update({
+                        'content': post_data.get('post_content', ''),
+                        'tone_used': post_data.get('tone_used', 'Unknown'),
+                        'content_summary': post_data.get('post_content', '')[:100] + '...' if len(post_data.get('post_content', '')) > 100 else post_data.get('post_content', ''),
+                        'approved_at': datetime.now().isoformat()
+                    })
+                    break
+            
+            # Update Airtable record
+            try:
+                record_id = post_to_regenerate.get('airtable_record_id')
+                if record_id:
+                    self.airtable.airtable.update(record_id, {
+                        'Generated Draft': post_data.get('post_content', ''),
+                        'AI Notes or Edits': f"Post regenerated on {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n{post_data.get('tone_reason', '')}"
+                    })
+            except Exception as e:
+                logger.warning(f"Failed to update Airtable record: {e}")
+            
+            # Update session context
+            self._update_session_context(query.from_user.id)
+            
+            await query.edit_message_text(
+                f"✅ **Post {post_id} regenerated successfully**\n\n"
+                f"**New tone:** {post_data.get('tone_used', 'Unknown')}\n"
+                f"**Content preview:** {post_data.get('post_content', '')[:100]}...\n\n"
+                f"The post has been updated in your series and Airtable.",
+                parse_mode='Markdown'
+            )
+            
+            # Return to series overview after 3 seconds
+            await asyncio.sleep(3)
+            await self._show_series_overview(query, None)
+            
+        except Exception as e:
+            await query.edit_message_text(
+                f"❌ **Error regenerating post:** {str(e)}",
+                parse_mode='Markdown'
+            )
+    
+    async def _view_individual_post(self, query, session, post_id: int):
+        """View details of an individual post."""
+        posts = session.get('posts', [])
+        post_to_view = None
+        
+        for post in posts:
+            if post['post_id'] == post_id:
+                post_to_view = post
+                break
+        
+        if not post_to_view:
+            await query.edit_message_text("❌ Post not found.")
+            return
+        
+        # Format post details
+        post_content = post_to_view.get('content', '')
+        if len(post_content) > 1000:
+            display_content = post_content[:1000] + "\n\n📝 [Content truncated for display]"
+        else:
+            display_content = post_content
+        
+        post_details = f"""📝 **Post {post_id} Details**
+
+**Tone:** {post_to_view['tone_used']}
+**Created:** {post_to_view.get('approved_at', 'Unknown')}
+**Airtable ID:** {post_to_view.get('airtable_record_id', 'Unknown')}
+
+**Relationship Info:**
+• Type: {post_to_view.get('relationship_type', 'None')}
+• Parent Post: {post_to_view.get('parent_post_id', 'None')}
+
+**Content:**
+───────────────────────────
+{display_content}
+───────────────────────────"""
+        
+        # Create action buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("🔄 Regenerate", callback_data=f"post_regenerate_{post_id}"),
+                InlineKeyboardButton("🗑️ Delete", callback_data=f"post_delete_{post_id}")
+            ],
+            [
+                InlineKeyboardButton("⬅️ Back to Series", callback_data="series_refresh")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            post_details.strip(),
+            reply_markup=reply_markup
+        )
+    
+    async def _show_post_management(self, query, user_id: int):
+        """Show post management interface with all posts."""
+        if user_id not in self.user_sessions:
+            await query.edit_message_text("❌ Session expired. Please upload a new file.")
+            return
+        
+        session = self.user_sessions[user_id]
+        posts = session.get('posts', [])
+        
+        if not posts:
+            await query.edit_message_text(
+                "❌ **No posts to manage**\n\n"
+                "Create some posts first before managing them.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Create post management message
+        management_message = f"""
+🔧 **Post Management**
+
+Series: {session.get('filename', 'Unknown')}
+Total Posts: {len(posts)}
+
+**Select a post to manage:**
+        """
+        
+        # Create buttons for each post
+        keyboard = []
+        for post in posts:
+            post_snippet = post.get('content_summary', 'No summary')[:40] + '...'
+            tone_emoji = self._get_tone_emoji(post['tone_used'])
+            button_text = f"{tone_emoji} Post {post['post_id']}: {post_snippet}"
+            callback_data = f"post_view_{post['post_id']}"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+        
+        # Add navigation buttons
+        keyboard.append([InlineKeyboardButton("⬅️ Back to Series", callback_data="series_refresh")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            management_message.strip(),
+            parse_mode='Markdown',
+            reply_markup=reply_markup
         )
 
 if __name__ == "__main__":

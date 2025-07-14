@@ -30,7 +30,8 @@ class AIContentGenerator:
     
     def generate_facebook_post(self, markdown_content: str, user_tone_preference: Optional[str] = None, 
                               session_context: Optional[str] = None, previous_posts: Optional[List[Dict]] = None,
-                              relationship_type: Optional[str] = None, parent_post_id: Optional[str] = None) -> Dict:
+                              relationship_type: Optional[str] = None, parent_post_id: Optional[str] = None,
+                              audience_type: Optional[str] = None) -> Dict:
         """
         Generate a Facebook post from markdown content with context awareness.
         
@@ -41,6 +42,7 @@ class AIContentGenerator:
             previous_posts: List of previous posts in the series
             relationship_type: How this post relates to previous posts
             parent_post_id: ID of the parent post to reference
+            audience_type: The target audience ('business' or 'technical')
             
         Returns:
             Dict containing the generated post, tone used, and metadata
@@ -53,13 +55,13 @@ class AIContentGenerator:
                 # Use context-aware prompt building
                 full_prompt = self._build_context_aware_prompt(
                     markdown_content, user_tone_preference, session_context, 
-                    previous_posts, relationship_type, parent_post_id
+                    previous_posts, relationship_type, parent_post_id, audience_type
                 )
-                system_prompt = self._get_context_aware_system_prompt()
+                system_prompt = self._get_context_aware_system_prompt(audience_type)
             else:
                 # Use original single-post prompt
-                full_prompt = self._build_full_prompt(markdown_content, user_tone_preference)
-                system_prompt = self._get_system_prompt()
+                full_prompt = self._build_full_prompt(markdown_content, user_tone_preference, audience_type)
+                system_prompt = self._get_system_prompt(audience_type)
             
             # Generate content using OpenAI
             response = self.client.chat.completions.create(
@@ -87,6 +89,7 @@ class AIContentGenerator:
                 'is_context_aware': is_context_aware,
                 'relationship_type': relationship_type,
                 'parent_post_id': parent_post_id,
+                'audience_type': audience_type
             }
             
             return result
@@ -94,10 +97,14 @@ class AIContentGenerator:
         except Exception as e:
             raise Exception(f"Error generating Facebook post: {str(e)}")
     
-    def _build_full_prompt(self, markdown_content: str, user_tone_preference: Optional[str] = None) -> str:
+    def _build_full_prompt(self, markdown_content: str, user_tone_preference: Optional[str] = None, audience_type: Optional[str] = None) -> str:
         """Build the complete prompt for the AI."""
         prompt_parts = []
         
+        if audience_type:
+            audience_instructions = self._get_audience_instructions(audience_type)
+            prompt_parts.append(audience_instructions)
+
         if user_tone_preference:
             prompt_parts.append(f"Please use the '{user_tone_preference}' tone style for this post.")
         
@@ -110,10 +117,15 @@ class AIContentGenerator:
     
     def _build_context_aware_prompt(self, markdown_content: str, user_tone_preference: Optional[str], 
                                    session_context: Optional[str], previous_posts: Optional[List[Dict]], 
-                                   relationship_type: Optional[str], parent_post_id: Optional[str]) -> str:
+                                   relationship_type: Optional[str], parent_post_id: Optional[str],
+                                   audience_type: Optional[str] = None) -> str:
         """Build a context-aware prompt for multi-post generation."""
         prompt_parts = []
         
+        if audience_type:
+            audience_instructions = self._get_audience_instructions(audience_type)
+            prompt_parts.append(audience_instructions)
+
         # Add relationship-specific instructions
         if relationship_type:
             relationship_instructions = self._get_relationship_instructions(relationship_type)
@@ -146,6 +158,12 @@ class AIContentGenerator:
         if relationship_type:
             variation_strategy = self._get_content_variation_strategy(relationship_type)
             prompt_parts.append(variation_strategy)
+        
+        # Add anti-repetition context
+        if previous_posts and relationship_type:
+            anti_repetition = self._add_anti_repetition_context(markdown_content, previous_posts, relationship_type)
+            if anti_repetition:
+                prompt_parts.append(anti_repetition)
         
         prompt_parts.append("MARKDOWN CONTENT TO TRANSFORM:")
         prompt_parts.append("---")
@@ -197,21 +215,155 @@ Maintain story flow and emotional continuity.
         }
         return instructions.get(relationship_type, "")
     
+    def _get_audience_instructions(self, audience_type: str) -> str:
+        """Get audience-specific instructions."""
+        if audience_type == 'business':
+            return self._get_business_audience_instructions()
+        elif audience_type == 'technical':
+            return self._get_technical_audience_instructions()
+        return ""
+
+    def _get_business_audience_instructions(self) -> str:
+        """Get specific instructions for business audience."""
+        return """
+AUDIENCE: Business Owner/General (like busy shop owners, service providers)
+
+Content Guidelines:
+- Use simple, clear language
+- Focus on business impact: time saved, money made, problems solved
+- Use relatable examples (running a shop, managing customers, handling inventory)
+- Avoid technical jargon - explain in everyday terms
+- Emphasize practical benefits and real-world results
+- Make it sound like you're talking to a friend who owns a business
+
+Examples of good language:
+- "This saves me 3 hours every week"
+- "My customers are happier because..."
+- "I used to spend all day on paperwork, now..."
+- "It's like having an assistant that never sleeps"
+"""
+
+    def _get_technical_audience_instructions(self) -> str:
+        """Get specific instructions for technical audience."""
+        return """
+AUDIENCE: Developer/Technical (like software engineers, data scientists)
+
+Content Guidelines:
+- Use precise, technical language where appropriate
+- Focus on the "how": architecture, algorithms, libraries, and tools used
+- Include code snippets or pseudocode for illustration
+- Explain technical challenges and trade-offs
+- Emphasize innovation, efficiency, and elegant solutions
+
+Examples of good language:
+- "I refactored the data pipeline using..."
+- "The key was to implement a caching layer with Redis..."
+- "This microservice was built with FastAPI and containerized with Docker..."
+- "We reduced query latency by 40% by adding an index to..."
+"""
+
     def _get_content_variation_strategy(self, relationship_type: str) -> str:
-        """Get content variation strategy for each relationship type."""
-        strategies = {
-            'different_aspects': "Focus on sections of the markdown that weren't emphasized in previous posts. Highlight different features or components.",
-            'different_angles': "Use the same core information but frame it differently. Change the perspective or emphasis.",
-            'series_continuation': "Build logically on previous posts. Assume readers have context from earlier posts.",
-            'thematic_connection': "Connect to broader themes and show patterns across projects or lessons.",
-            'technical_deep_dive': "Go deeper into technical details, code examples, or implementation specifics.",
-            'sequential_story': "Continue the chronological narrative. Focus on what happened next in the timeline."
+        """Get content variation strategy based on relationship type."""
+        # Base anti-repetition instructions
+        base_instructions = """
+CONTENT VARIATION STRATEGY:
+- Avoid repeating exact phrases from previous posts
+- Use different examples and analogies
+- Vary sentence structure and opening statements
+- Introduce new perspectives or angles
+- Reference different aspects of the technical implementation
+"""
+        
+        # Relationship-specific variation strategies
+        variation_strategies = {
+            'Different Aspects': base_instructions + """
+- Focus on completely different features or components
+- Highlight different user benefits or use cases
+- Explore different technical challenges overcome
+- Discuss different development phases or stages
+""",
+            
+            'Different Angles': base_instructions + """
+- Change perspective: technical vs business vs user experience
+- Vary the narrative voice: builder vs user vs observer
+- Focus on different emotional aspects: excitement vs challenge vs pride
+- Alternate between problem-focused and solution-focused narratives
+""",
+            
+            'Series Continuation': base_instructions + """
+- Build chronologically on previous content
+- Introduce new developments or improvements
+- Show progression and evolution of ideas
+- Reference 'what happened next' or 'building further'
+- Avoid repeating the same accomplishments
+""",
+            
+            'Technical Deep Dive': base_instructions + """
+- Explore different technical layers (frontend, backend, database)
+- Focus on different programming concepts or patterns
+- Discuss different tools or technologies used
+- Vary between high-level architecture and implementation details
+""",
+            
+            'Thematic Connection': base_instructions + """
+- Connect through underlying principles rather than surface details
+- Explore different philosophical or strategic aspects
+- Draw different life or business lessons
+- Use different metaphors and analogies
+""",
+            
+            'Sequential Story': base_instructions + """
+- Focus on different timeline segments
+- Introduce new characters or stakeholders
+- Show different stages of problem-solving
+- Highlight different obstacles and breakthroughs
+""",
+            
+            'AI Decide': base_instructions + """
+- Let AI determine the best variation approach
+- Combine multiple strategies for maximum variety
+- Ensure each post offers unique value and perspective
+"""
         }
-        return f"CONTENT STRATEGY: {strategies.get(relationship_type, '')}"
+        
+        return variation_strategies.get(relationship_type, base_instructions)
     
-    def _get_context_aware_system_prompt(self) -> str:
+    def _add_anti_repetition_context(self, markdown_content: str, previous_posts: List[Dict], 
+                                   relationship_type: str) -> str:
+        """Add context to prevent content repetition."""
+        if not previous_posts:
+            return ""
+        
+        # Extract key phrases and topics from previous posts
+        previous_content = []
+        for post in previous_posts[-3:]:  # Look at last 3 posts
+            content = post.get('content', '')
+            if content:
+                # Extract first sentences as key phrases
+                sentences = content.split('.')[:3]
+                previous_content.extend(sentences)
+        
+        if not previous_content:
+            return ""
+        
+        # Create anti-repetition instructions
+        anti_repetition = f"""
+ANTI-REPETITION REQUIREMENTS:
+- Previous posts used these opening approaches: {'; '.join(previous_content[:5])}
+- Do NOT start with similar phrases or structures
+- Introduce completely new examples and analogies
+- Use different vocabulary and sentence patterns
+- Bring fresh perspective while maintaining series coherence
+- Focus on aspects NOT covered in previous posts
+"""
+        
+        return anti_repetition
+    
+    def _get_context_aware_system_prompt(self, audience_type: Optional[str] = None) -> str:
         """Get enhanced system prompt for context-aware generation."""
-        return self._get_business_context_aware_system_prompt()
+        if audience_type == 'business':
+            return self._get_business_context_aware_system_prompt()
+        return self._get_base_system_prompt() # Fallback for technical or general
 
     def _get_business_context_aware_system_prompt(self) -> str:
         """Get business-focused context-aware system prompt."""
@@ -232,63 +384,81 @@ Maintain story flow and emotional continuity.
         
         return business_prompt + context_instructions
 
-    def _get_system_prompt(self) -> str:
+    def _get_system_prompt(self, audience_type: Optional[str] = None) -> str:
         """Get system prompt based on audience type."""
-        return self._get_business_system_prompt()
+        if audience_type == 'business':
+            return self._get_business_system_prompt()
+        elif audience_type == 'technical':
+            return self._get_technical_system_prompt()
+        return self._get_base_system_prompt() # Default
+
+    def _get_base_system_prompt(self) -> str:
+        """Base system prompt for general use."""
+        return """You are a smart, helpful copywriter who turns project ideas and build summaries into engaging social media posts."""
+
+    def _get_technical_system_prompt(self) -> str:
+        """System prompt for a technical audience."""
+        return self._get_base_system_prompt() + """
+You are writing for a technical audience of developers and engineers.
+- Be precise and clear.
+- Use correct terminology.
+- Focus on the technical implementation, challenges, and solutions.
+"""
 
     def _get_business_system_prompt(self) -> str:
-        """Updated prompt for generating simple, everyday-language Facebook posts for business owners."""
-        return """You are a smart, helpful copywriter who turns project ideas and build summaries into **simple and clear Facebook posts** for small business owners.
+        """Updated prompt for generating simple, clear Facebook posts for business owners."""
+        return """You are a helpful copywriter who turns project notes into clear, practical Facebook posts for small business owners.
 
-Your audience is someone like “Nthambi the Hustla” — a hardworking person managing their business from their phone. They may not be tech-savvy, but they understand the hustle. Your job is to **make their life easier by explaining solutions in plain language.**
+Your audience is busy business owners who want practical solutions. They may not be highly technical, but they understand business challenges. Your job is to explain solutions in clear, everyday language.
 
-They don’t care about code or jargon. They want to know:
+They want to know:
 - What problem this solves  
-- How it works (in simple steps)  
+- How it works (in simple terms)  
 - Why it matters for their business  
-- What result they can expect
+- What realistic results they can expect
 
 ---
 
 ### ✍️ Your task:
 
-Generate a **new Facebook post from scratch** using the content I provide (notes, markdown, or build summaries).
+Generate a conversational Facebook post from the content provided. Write it naturally, like you're explaining something useful to a business colleague.
 
-**Keep the post in basic, everyday English.** Write it like you're sending a WhatsApp voice note or chatting in a group. Imagine you’re explaining it to someone who sells vegetables, runs a salon, or manages a small car wash — **make sure they get it**.
-
----
-
-### ✏️ Format the post like this:
-
-1. **Start with a hook** – something relatable or surprising  
-2. **Keep paragraphs short** (1–3 lines max)  
-3. **Use emojis** to keep it fun and easy to follow  
-4. **Use bold or ALL CAPS** to highlight important stuff  
-5. **Avoid technical words** like “API”, “database”, or “integration” — replace them with plain terms like “connected”, “saved”, “automatically updated”, or “it talks to each other”  
-6. **Include a real example** like `/log income - 5000 - Shop 1 rent`  
-7. **End with a simple CTA** like: “DM me if you want to try it” or “Want me to show you how it works?”
-8. **Get straight to the point.** Do not use greetings like "Hello everyone" or "Hi team".
+**Use clear, everyday language.** Avoid technical jargon and replace complex terms with simple ones:
+- Instead of "API integration" → say "connected systems"
+- Instead of "database" → say "stored information"
+- Instead of "automated workflow" → say "handles tasks automatically"
 
 ---
 
-### 🧠 Brand tone options to use:
-Choose one that fits the story best.
+### ✏️ Format guidelines:
 
-- 🧩 **Behind-the-Build** – “Here’s what I made and why”
-- 💡 **What Broke** – “Something failed, here’s what I learned”
-- 🚀 **Finished & Proud** – “Just launched something cool!”
-- 🎯 **Problem → Solution → Result** – “This fixed a real problem and here’s the outcome”
-- 📓 **Mini Lesson** – “A simple insight I learned while building this”
+1. **Start naturally** – no dramatic hooks or greetings
+2. **Use normal paragraphs** (2-4 sentences each)
+3. **Include practical examples** when helpful
+4. **Use simple language** that anyone can understand
+5. **Be honest about limitations** – don't oversell
+6. **End with a genuine question or observation**
+7. **Minimal emojis** – only when they add clarity
+
+---
+
+### 🧠 Choose the most appropriate tone:
+
+- 🧩 **Behind-the-Build** – "Here's what I worked on and why"
+- 💡 **What Broke** – "Something didn't work as expected, here's what I learned"
+- 🚀 **Finished & Proud** – "Got this working, here's what it does"
+- 🎯 **Problem → Solution → Result** – "This addressed a real problem with practical results"
+- 📓 **Mini Lesson** – "A simple insight from working on this"
 
 ---
 
 **Output Format:**
 
 TONE: [chosen tone name]
-POST: [Facebook post content in very simple language]
-REASON: [why this tone was used and how it fits the audience]
+POST: [Facebook post content in clear, conversational language]
+REASON: [brief explanation of tone choice and audience fit]
 
-**IMPORTANT:** Make sure the language is clear, basic, and beginner-friendly — even someone with no tech or business background should understand what’s being shared.
+**IMPORTANT:** Keep the language natural and conversational. Avoid hype, excessive enthusiasm, or sales-like language. Focus on practical value and honest communication.
 """
 
     def _parse_ai_response(self, response: str) -> Dict:
@@ -334,6 +504,8 @@ REASON: [why this tone was used and how it fits the audience]
                 post_content = post_match.group(1).strip()
                 # Clean up the post content
                 post_content = post_content.replace('```', '').strip()
+                # Unescape common markdown characters
+                post_content = post_content.replace('\\*', '*').replace('\\_', '_').replace('\\`', '`').replace('\\#', '#').replace('\\.', '.').replace('\\!', '!').replace('\\-', '-').replace('\\(', '(').replace('\\)', ')').replace('\\[', '[').replace('\\]', ']')
                 result['post'] = post_content
                 break
         

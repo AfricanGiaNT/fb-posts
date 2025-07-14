@@ -1,0 +1,54 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# My Journey Building the AI Facebook Content Generator
+
+## What I Built
+I built an intelligent Telegram bot that transforms my raw, technical project notes from markdown files into engaging, audience-aware Facebook posts. It started as a simple script and evolved into a sophisticated AI assistant that handles context, generates post series, adapts its language for different audiences, and even adds a touch of local humor.
+
+## The Problem
+As a developer, I was building and shipping projects constantly, but I was terrible at sharing my work on social media. My notes were just technical ramblings in markdown files. Translating them into something a non-technical person could understand felt like a chore, so I rarely did it. I needed a way to bridge the gap between my technical documentation and creating engaging content for platforms like Facebook.
+
+## My Solution
+My solution evolved over several phases, each adding a new layer of intelligence.
+
+**Phase 1: The Basic AI Copywriter**
+The first version was a simple Python script. It took a markdown file, fed the whole thing to the OpenAI API, and asked it to "write a Facebook post." It worked, but the results were generic and lacked personality.
+
+**Phase 2: Introducing Brand Tones & Context**
+To improve quality, I introduced "Brand Tones" (e.g., "Behind-the-Build," "What Broke"). This gave the AI a persona to write from. I also taught it to generate a *series* of posts from a single markdown file, with each new post building on the last. This was the birth of context-awareness, where the bot would remember previous posts to create a coherent narrative.
+
+**Phase 3: Making it Interactive with a Telegram Bot**
+A command-line script wasn't user-friendly. I wrapped the entire system in a Telegram bot. Now, I could just send a markdown file to the bot, and it would handle everything. I added interactive buttons to approve, reject, or regenerate posts, making the workflow seamless.
+
+**Phase 4: Audience-Aware Generation & Refinement**
+This was the most critical enhancement. I realized a "one-size-fits-all" post wasn't effective. I needed to speak differently to my developer friends versus potential business clients. I implemented an "Audience Selection" feature. Now, I can choose between a "Technical" or "Business" audience, and the AI completely changes its language, focusing on technical details for the former and business impact for the latter. I also added a feature to integrate Chichewa humor for a local touch and fixed formatting bugs along the way.
+
+## How It Works: The Technical Details
+The system is a Python application with several key components:
+
+-   **Telegram Bot Interface (`python-telegram-bot`)**: Handles all user interaction, file uploads, and interactive keyboards.
+-   **AI Content Generation (`openai`)**: The core logic resides in the `AIContentGenerator` class. It dynamically builds highly detailed prompts based on the user's request, including the markdown content, brand tone, relationship type, previous posts, and audience type.
+-   **Prompt Engineering**: This is the secret sauce. The prompts are carefully engineered to guide the AI. For instance, the business prompt explicitly tells the AI to "avoid technical jargon" and "focus on business impact," while the technical prompt asks for "architecture, algorithms, and code snippets."
+-   **State Management**: User sessions are managed in memory to track the ongoing series of posts, including the original markdown, generated drafts, and selected audience.
+-   **Content Creation Guidelines**: I created a `rules/content_creation_guidelines.md` file to standardize the input format, which dramatically improved the AI's ability to parse the source material and generate high-quality output.
+
+```python
+# Example of the un-escaping logic added to fix the backslash issue
+post_content = post_content.replace('\\*', '*').replace('\\_', '_').replace('\\`', '`')
+```
+
+## The Impact / Result
+The result is a powerful content creation engine that has solved my initial problem completely.
+-   **Efficiency**: I can now generate a week's worth of high-quality, targeted social media content from a single project's notes in under 5 minutes.
+-   **Consistency**: My online presence is more consistent and professional.
+-   **Engagement**: By tailoring content to the audience, I've seen a noticeable increase in engagement on my posts. The "Business" posts generate leads, while the "Technical" posts spark interesting conversations with peers.
+-   **It's Fun!**: The bot has made content creation enjoyable. It feels like I have a smart, tireless assistant working for me.
+
+## Key Lessons Learned
+1.  **The Power of Iteration**: Starting simple and adding features incrementally was the right approach. Each phase built upon a solid foundation.
+2.  **Garbage In, Garbage Out**: The quality of the AI's output is directly proportional to the quality of the input. Creating the `content_creation_guidelines.md` was a game-changer for getting reliable results.
+3.  **Prompt Engineering is an Art**: The real magic is in the prompts. Being incredibly specific and providing clear instructions and examples to the AI makes all the difference.
+4.  **Listen to Your (User) Feedback**: Even as the sole user, I had to pay attention to my own pain points. The backslash bug was annoying, so I fixed it. The initial script was clunky, so I built the Telegram bot.
