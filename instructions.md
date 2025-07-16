@@ -1,102 +1,103 @@
-# AI Facebook Content Generator - Instructions
+# Instructions for AI Facebook Content Generator
 
-## 🎯 Project Overview
+## Current Status
+- **Phase 1**: ✅ Core Infrastructure - Enhanced sessions, Airtable schema  
+- **Phase 2**: ✅ AI Context System - Context-aware prompting, enhanced AI  
+- **Phase 3**: ✅ UI Enhancement - New workflows, preview system, series management  
+- **Phase 4**: 📋 **SIMPLIFIED FEATURES** - Audience-aware content, Chichewa humor, content continuation  
 
-This system converts Markdown documentation about automation projects into engaging Facebook posts using AI, delivered through a Telegram bot interface.
+## File Format Requirements
 
-## 🚧 Current Development Status
+### Developer Journal Files
+- **Location**: `content/dev_journal/`
+- **Format**: `milestone-name-001.md` (sequential numbering, no dates)
+- **Content**: Development milestones and achievements
+- **Guidelines**:
+  - No time references or duration mentions
+  - Focus on Problem → Solution → Result narrative
+  - Present completed work, not ongoing projects
+  - Use milestone-first naming: `implement-feature-001.md`, `fix-bug-001.md`
 
-**Active Enhancement**: Multi-Post Generation with Continuity  
-**Status**: 🟢 Phase 2 Complete - Ready for Phase 3  
-**Tracking Document**: `content/multi_post_enhancement_plan.md`
+### Content Structure
+Files should follow the `.mdc` format guidelines:
+- `## What I Built` - Clear summary of the feature/fix
+- `## The Problem` - Specific pain point addressed
+- `## My Solution` - How the problem was solved
+- `## How It Works: The Technical Details` - Technical implementation
+- `## The Impact / Result` - Quantified outcomes
+- `## Key Lessons Learned` - Insights and takeaways
 
-**✅ COMPLETED - Phase 2: AI Context System**:
-- **Context-Aware Generation**: AI now uses session context and previous posts for coherent, connected content
-- **6 Relationship Types**: Different Aspects, Different Angles, Series Continuation, Thematic Connection, Technical Deep Dive, Sequential Story
-- **Reference Generation**: Natural post-to-post references ("In my last post...", "Building on what I shared...")
-- **Content Variation**: Different strategies for each relationship type to ensure variety
-- **Series Continuity**: Automatic relationship type suggestions based on previous posts
-- **Context-Aware Regeneration**: Maintains series coherence while applying user feedback
+**Important**: All content should avoid time references and focus on the achievement itself.
 
-**🚧 IN PROGRESS - Phase 3: User Interface Enhancement**:
-- Enhanced approval workflow with relationship selection
-- Relationship type selection interface
-- Post connection preview system
-- Advanced multi-post management interface
+## AI Content Generation
 
-## 🔄 System Flow
+### Content Processing
+The AI system processes developer journal entries with these key instructions:
+- Files follow `milestone-name-001.md` format (sequential, no dates)
+- Content represents completed work without time references
+- Focus on Problem → Solution → Result narrative
+- Present work as finished accomplishments
 
-### **Current (v1.0)**
-1. **Input**: Send markdown file to Telegram bot
-2. **Processing**: AI analyzes content using 5 brand tone styles
-3. **Review**: Interactive approval/rejection via Telegram
-4. **Storage**: Approved drafts saved to Airtable
-5. **Output**: Ready-to-post Facebook content
+### Voice Guidelines
+- **First-person only**: "I built...", "I discovered...", "I learned..."
+- **Never use "we"**: No "We built", "Our system", "Our solution"
+- **No time references**: Never "took 3 days", "spent hours", "recently"
+- **Completed achievements**: Present work as finished, not ongoing
 
-### **Enhanced (v2.0 - Phase 2 Complete)**
-1. **Input**: Send markdown file to Telegram bot
-2. **Processing**: AI analyzes content using 5 brand tone styles
-3. **Review**: Interactive approval/rejection via Telegram
-4. **Storage**: Approved drafts saved to Airtable with series tracking
-5. **Continuation**: Choose to generate another related post
-6. **Context-Aware Generation**: AI uses session context and previous posts for continuity
-7. **Relationship Selection**: System suggests optimal relationship type automatically
-8. **Reference Generation**: Natural cross-post references maintain narrative flow
-9. **Output**: Series of related, engaging Facebook posts with natural continuity
+### Content Tones
+AI chooses from 5 brand tones:
+- 🧩 **Behind-the-Build** - Matter-of-fact process sharing
+- 💡 **What Broke** - Honest reflection on mistakes and fixes
+- 🚀 **Finished & Proud** - Quiet satisfaction with completion
+- 🎯 **Problem → Solution → Result** - Direct, practical approach
+- 📓 **Mini Lesson** - Thoughtful insights from development
 
-### **Target (v2.0 - Phase 3 in Development)**
-1. **Input**: Send markdown file to Telegram bot
-2. **Processing**: AI analyzes content using 5 brand tone styles
-3. **Review**: Interactive approval/rejection via Telegram
-4. **Storage**: Approved drafts saved to Airtable with series tracking
-5. **Continuation**: Choose to generate another related post
-6. **Relationship Selection**: User selects relationship type with preview
-7. **Context Selection**: Choose which previous post to build upon
-8. **Preview**: See how posts connect before generation
-9. **Context-Aware Generation**: AI uses selected context for targeted continuity
-10. **Output**: Series of strategically related, engaging Facebook posts
+## 🎯 **Enhanced AI System Features**
 
-## 🎙️ Brand Tone Styles
+### **Phase 1: Core Infrastructure** ✅ **COMPLETED**
+- Enhanced session management with post tracking
+- Improved Airtable schema for better data organization
+- Multi-post series support with relationship tracking
 
-1. **🧩 Behind-the-Build** - "Built this with Cursor AI..."
-2. **💡 What Broke** - "I broke something I built. And I loved it."
-3. **🚀 Finished & Proud** - "Just shipped this automation..."
-4. **🎯 Problem → Solution → Result** - Clear pain point resolution
-5. **📓 Mini Lesson** - Philosophical automation insights
+### **Phase 2: AI Context System** ✅ **COMPLETED**
+- Context-aware prompting for consistent series generation
+- Enhanced AI response parsing and error handling
+- Relationship-based content variation (different aspects, angles, continuations)
 
-## 🔗 New Relationship Types (v2.0)
+### **Phase 3: UI Enhancement** ✅ **COMPLETED**
+- New Telegram bot workflows for improved user experience
+- Enhanced preview system with better formatting
+- Series management commands (`/series`, `/status`)
+- Improved help system and status tracking
 
-1. **🔍 Different Aspects** - Focus on different sections/features
-2. **📐 Different Angles** - Technical vs. business vs. personal perspective
-3. **📚 Series Continuation** - Sequential parts (Part 1, 2, 3...)
-4. **🔗 Thematic Connection** - Related philosophy/principles
-5. **🔧 Technical Deep Dive** - Detailed technical explanation
-6. **📖 Sequential Story** - "What happened next" narrative
+### **Phase 4: Simplified Enhancement** 📋 **PLANNING**
+**Timeline**: 2 Weeks  
+**Status**: 📋 **PLANNING COMPLETE**
 
-## 📋 Setup Requirements
+**Key Focus**: "Nthambi the hustla" - busy business operators who want practical content, not technical deep dives.
 
-### Environment Variables
-- `TELEGRAM_BOT_TOKEN`: Your Telegram bot token
-- `OPENAI_API_KEY`: OpenAI API key for GPT-4o
-- `AIRTABLE_API_KEY`: Airtable personal access token
-- `AIRTABLE_BASE_ID`: Your Airtable base ID
-- `AIRTABLE_TABLE_NAME`: Content Tracker table name
+#### **Feature 1: Audience-Aware Content Generation** 🔥 **HIGHEST PRIORITY**
+- **Audience Selection**: "Business Owner/General" vs "Developer/Technical" 
+- **Language Adaptation**: Simple, clear language for business owners
+- **Jargon Avoidance**: Replace technical terms with relatable examples
+- **Business Impact Focus**: Time saved, money made, problems solved
 
-### Dependencies
-- python-telegram-bot
-- openai
-- airtable-python-wrapper
-- python-dotenv
+#### **Feature 2: Chichewa Humor Integration** 🟡 **MEDIUM PRIORITY**
+- **Natural Integration**: Phrases that enhance, don't complicate
+- **Contextual Usage**: Different phrases for different situations  
+- **Cultural Sensitivity**: Appropriate usage with context
+- **Humor Addition**: Add personality without confusion
 
-## 🚀 Usage
+#### **Feature 3: Content Continuation** 🟢 **MEDIUM PRIORITY**
+- **Input Method**: `/continue` command + paste existing post text
+- **Analysis**: AI identifies continuation opportunities
+- **Natural References**: "In my last post...", "Building on what I shared..."
+- **Value Addition**: New perspective, not just repetition
 
-1. Start the bot: `python scripts/telegram_bot.py`
-2. Send markdown file to bot
-3. Review generated draft
-4. Approve/reject/regenerate as needed
-5. **(v2.0)** Choose to generate another related post
-6. **(v2.0)** Select relationship type and previous post to build on
-7. Check Airtable for approved content
+#### **Simplified Implementation Strategy**
+- **Week 1**: Audience selection system + business-friendly content adaptation
+- **Week 2**: Chichewa phrase integration + content continuation feature
+- **Focus**: Practical value over complex features
 
 ## 📁 Project Structure
 
@@ -105,6 +106,10 @@ This system converts Markdown documentation about automation projects into engag
 /config/           # Configuration files
 /rules/            # AI behavior and tone rules
 /content/          # Input/output content and project tracking
+  ├── dev_journal/               # Developer journal entries (milestone-name-001.md)
+  ├── generated_drafts/          # AI-generated Facebook post drafts
+  ├── reviewed_drafts/           # Final edited versions post-review
+  └── markdown_logs/             # Legacy markdown content
 /docs/             # Documentation
 ```
 
@@ -113,15 +118,38 @@ This system converts Markdown documentation about automation projects into engag
 - `/start` - Initialize bot
 - `/help` - Show help message
 - `/status` - Check system status
+- `/series` - View current post series (Phase 3)
 - Send .md file - Process markdown content
 
 ## 🔄 Development Timeline
 
-**Phase 1 (Week 1)**: Core Infrastructure - Enhanced sessions, Airtable schema  
-**Phase 2 (Week 1-2)**: AI Context System - Context-aware prompting, enhanced AI  
-**Phase 3 (Week 2)**: UI Enhancement - New workflows, preview system  
-**Phase 4 (Week 2-3)**: Advanced Features - Strategy engine, analytics  
+**Phase 1 (Week 1)**: ✅ Core Infrastructure - Enhanced sessions, Airtable schema  
+**Phase 2 (Week 1-2)**: ✅ AI Context System - Context-aware prompting, enhanced AI  
+**Phase 3 (Week 2)**: ✅ UI Enhancement - New workflows, preview system, series management  
+**Phase 4 (Week 3-4)**: 📋 **SIMPLIFIED FEATURES** - Audience-aware content, Chichewa humor, content continuation  
 
 ## 📊 Progress Tracking
 
-See `content/multi_post_enhancement_plan.md` for detailed progress tracking, technical implementation details, and development notes. 
+**Active Reference Documents:**
+- `content/multi_post_enhancement_plan.md` - Overall project progress and technical details
+- `content/phase_3_ui_enhancement_plan.md` - Detailed Phase 3 implementation plan and tracking
+- `content/phase_4_simplified_plan.md` - **UPDATED** - Focused Phase 4 features for business audience
+
+**Current Status**: Phase 3 complete, Phase 4 simplified planning complete with focus on business owner audience and practical features.
+
+## File Naming Updates
+
+**Previous Format**: `milestone-name_YYYY-MM-DD.md`
+**New Format**: `milestone-name-001.md`
+
+All existing files have been renamed to the new sequential format. The AI system has been updated to:
+- Understand the new file naming convention
+- Process content without time references
+- Focus on completed achievements and their impact
+- Present work as finished accomplishments
+
+**Benefits of New Format**:
+- Eliminates misleading time implications
+- Focuses on achievement rather than duration
+- Simplifies file management and scanning
+- Avoids false impression of development speed 

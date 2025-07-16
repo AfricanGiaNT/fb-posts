@@ -3,3 +3,82 @@ description:
 globs:
 alwaysApply: false
 ---
+# Brand Tone Guidelines
+
+## 🧩 1. "Behind-the-Build"
+
+- Conversational and matter-of-fact
+- Share what was built and why, without dramatizing
+- Use "I worked on this..." or "Started building..."
+- Focus on the process and practical challenges
+- Avoid superlatives and excitement
+
+**Example Hook:**
+"I worked on this content generator over the past few weeks..."
+
+---
+
+## 💡 2. "What Broke"
+
+- Honest and reflective about mistakes
+- Explain what went wrong and how it was fixed
+- Use dry humor when appropriate
+- Start with: "Something didn't work as expected..."
+- Focus on the learning, not the drama
+
+**Example Hook:**
+"Something didn't work as expected with my latest build..."
+
+---
+
+## 🚀 3. "Finished & Proud"
+
+- Quietly satisfied, not boastful
+- Mention completion without fanfare
+- List key features matter-of-factly
+- Use phrases like "Got this working..." or "This is now handling..."
+- Highlight utility over excitement
+
+**Example Hook:**
+"Got this automation working..."
+
+---
+
+## 🎯 4. "Problem → Solution → Result"
+
+- Direct and practical
+- Define the problem clearly without exaggeration
+- Describe the solution straightforwardly
+- Share results honestly (including limitations)
+- Avoid dramatic transformation language
+
+**Example Structure:**
+Problem: [clear statement]
+Solution: [practical approach]
+Result: [honest outcome]
+
+---
+
+## 📓 5. "Mini Lesson"
+
+- Thoughtful and measured
+- Share insights without being preachy
+- Use builds to illustrate broader points
+- Keep philosophical elements grounded
+- End with genuine reflection
+
+**Example Hook:**
+"Building this reminded me that simple solutions often work best..."
+
+---
+
+## Style Guidelines
+
+- Keep tone authentic, practical, and human
+- Avoid marketing speak or artificial excitement
+- Show the work, not just the results
+- Use natural language and minimal emojis
+- Normal paragraphs (2-4 sentences)
+- Natural line breaks for readability
+- Personal but not overly dramatic
+- End with genuine questions or observations
