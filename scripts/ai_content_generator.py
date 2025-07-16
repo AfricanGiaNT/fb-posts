@@ -7,16 +7,41 @@ from typing import Dict, Optional, List
 import re
 from datetime import datetime
 import json
-from chichewa_integrator import ChichewaIntegrator
+
+# Handle both absolute and relative imports
+try:
+    from chichewa_integrator import ChichewaIntegrator
+except ImportError:
+    from .chichewa_integrator import ChichewaIntegrator
+
+# Claude support
+try:
+    import anthropic
+    CLAUDE_AVAILABLE = True
+except ImportError:
+    CLAUDE_AVAILABLE = False
 
 class AIContentGenerator:
-    """Handles AI-powered content generation using OpenAI."""
+    """Handles AI-powered content generation using OpenAI or Claude."""
     
     def __init__(self, config_manager):
         self.config = config_manager
-        self.client = openai.OpenAI(api_key=self.config.openai_api_key)
         self.prompt_template = self.config.get_prompt_template()
         self.chichewa_integrator = ChichewaIntegrator()
+        
+        # Initialize the appropriate client based on configuration
+        self.provider = self.config.content_generation_provider
+        
+        if self.provider == 'openai':
+            self.client = openai.OpenAI(api_key=self.config.openai_api_key)
+            self.model = self.config.openai_model
+        elif self.provider == 'claude':
+            if not CLAUDE_AVAILABLE:
+                raise ImportError("Claude support requires 'anthropic' package. Install with: pip install anthropic")
+            self.client = anthropic.Anthropic(api_key=self.config.claude_api_key)
+            self.model = self.config.claude_model
+        else:
+            raise ValueError(f"Unsupported provider: {self.provider}")
         
         # Phase 2: Relationship types for context-aware generation
         self.relationship_types = {
@@ -27,6 +52,68 @@ class AIContentGenerator:
             'technical_deep_dive': '🔧 Technical Deep Dive',
             'sequential_story': '📖 Sequential Story'
         }
+    
+    def _generate_content(self, system_prompt: str, user_prompt: str, temperature: float = 0.7, max_tokens: int = 2500) -> str:
+        """Unified content generation method that works with both OpenAI and Claude."""
+        try:
+            if self.provider == 'openai':
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                )
+                return response.choices[0].message.content
+            
+            elif self.provider == 'claude':
+                # Claude uses a different API format
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    system=system_prompt,
+                    messages=[
+                        {"role": "user", "content": user_prompt}
+                    ]
+                )
+                return response.content[0].text
+            
+            else:
+                raise ValueError(f"Unsupported provider: {self.provider}")
+                
+        except Exception as e:
+            raise Exception(f"Error generating content with {self.provider}: {str(e)}")
+    
+    def get_model_info(self) -> Dict:
+        """Get information about the current model configuration."""
+        return {
+            'provider': self.provider,
+            'model': self.model,
+            'supports_streaming': self.provider == 'claude',
+            'max_tokens_supported': 4096 if self.provider == 'openai' else 8192,
+            'description': self._get_model_description()
+        }
+    
+    def _get_model_description(self) -> str:
+        """Get a description of the current model's capabilities."""
+        descriptions = {
+            'openai': {
+                'gpt-4o': 'GPT-4o: Advanced reasoning, good for technical content',
+                'gpt-4': 'GPT-4: Reliable, balanced performance',
+                'gpt-3.5-turbo': 'GPT-3.5 Turbo: Fast, cost-effective'
+            },
+            'claude': {
+                'claude-3-5-sonnet-20241022': 'Claude 3.5 Sonnet: Excellent creative writing, storytelling, and copywriting',
+                'claude-3-opus-20240229': 'Claude 3 Opus: Highest quality reasoning and creativity',
+                'claude-3-haiku-20240307': 'Claude 3 Haiku: Fast, efficient for simple tasks'
+            }
+        }
+        
+        provider_models = descriptions.get(self.provider, {})
+        return provider_models.get(self.model, f'{self.provider} model: {self.model}')
     
     def generate_facebook_post(self, markdown_content: str, user_tone_preference: Optional[str] = None, 
                               session_context: Optional[str] = None, previous_posts: Optional[List[Dict]] = None,
@@ -64,18 +151,11 @@ class AIContentGenerator:
                 system_prompt = self._get_system_prompt(audience_type)
             
             # Generate content using OpenAI
-            response = self.client.chat.completions.create(
-                model=self.config.openai_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": full_prompt}
-                ],
-                max_tokens=1200,  # Slightly increased for context-aware posts
-                temperature=0.7
+            generated_content = self._generate_content(
+                system_prompt, full_prompt, temperature=0.7, max_tokens=2500
             )
             
             # Parse the response
-            generated_content = response.choices[0].message.content
             parsed_response = self._parse_ai_response(generated_content)
             
             # Add metadata
@@ -84,7 +164,7 @@ class AIContentGenerator:
                 'tone_used': parsed_response.get('tone', 'Unknown'),
                 'tone_reason': parsed_response.get('reason', 'No reason provided'),
                 'generated_at': datetime.now().isoformat(),
-                'model_used': self.config.openai_model,
+                'model_used': self.model,
                 'original_markdown': markdown_content,
                 'is_context_aware': is_context_aware,
                 'relationship_type': relationship_type,
@@ -379,6 +459,15 @@ ANTI-REPETITION REQUIREMENTS:
 - Ensure each post adds new business value while maintaining series coherence
 - Keep the business-friendly language consistent across all posts in the series
 - Focus on different business aspects or benefits in each post to avoid repetition
+- Never mention time frames or duration across the series
+- Present each milestone as a completed achievement that adds business value
+
+**CONTENT PROCESSING FOR SERIES:**
+- Each markdown file represents a completed development milestone
+- Extract unique business value from each milestone
+- Ignore any file naming patterns or dates
+- Focus on different business benefits or use cases
+- Present work as finished accomplishments that solve business problems
 
 """
         
@@ -394,20 +483,91 @@ ANTI-REPETITION REQUIREMENTS:
 
     def _get_base_system_prompt(self) -> str:
         """Base system prompt for general use."""
-        return """You are a smart, helpful copywriter who turns project ideas and build summaries into engaging social media posts."""
+        return """You are a smart, helpful copywriter who turns project ideas and build summaries into engaging social media posts.
+
+**CRITICAL UNDERSTANDING:**
+- You are processing developer journal entries from `content/dev_journal/`
+- Files follow the format: `milestone-name-001.md` (sequential numbering, no dates)
+- Content describes development work but contains NO TIME REFERENCES
+- Focus on the Problem → Solution → Result narrative, not duration
+- Content represents completed work, not ongoing projects
+
+**CRITICAL VOICE ENFORCEMENT:**
+You are writing as a solo developer sharing personal projects. Use ONLY first-person language:
+✅ ALWAYS use "I" language:
+- "I built this system..."
+- "I discovered that..."
+- "I learned..."
+- "I struggled with..."
+- "I found a solution..."
+
+❌ NEVER use "WE" language:
+- Never: "We built", "Our system", "Our solution"
+- Never: "We discovered", "We learned", "We found"
+- Never: "Our integrated", "Our smart", "Our advanced"
+
+❌ NEVER add time references:
+- Never: "took 3 days", "spent hours", "after a week"
+- Never: "recently", "yesterday", "last month"
+- Never: "over the weekend", "in the evening"
+
+This is YOUR personal project that YOU built. Share it authentically in first person without time frames.
+
+**Content Processing Instructions:**
+- The markdown content represents a completed development milestone
+- Extract the core problem, solution, and result
+- Ignore any file naming patterns or dates
+- Focus on the technical achievement and its impact
+- Present the work as a finished accomplishment"""
 
     def _get_technical_system_prompt(self) -> str:
         """System prompt for a technical audience."""
         return self._get_base_system_prompt() + """
+
+**TECHNICAL AUDIENCE FOCUS:**
 You are writing for a technical audience of developers and engineers.
 - Be precise and clear.
 - Use correct terminology.
 - Focus on the technical implementation, challenges, and solutions.
+- Share code snippets and technical details when relevant.
+- Explain your architectural decisions and trade-offs.
+- Present technical work as completed achievements without time references.
+- Focus on what was built, how it works, and the technical impact.
 """
 
     def _get_business_system_prompt(self) -> str:
         """Updated prompt for generating simple, clear Facebook posts for business owners."""
         return """You are a helpful copywriter who turns project notes into clear, practical Facebook posts for small business owners.
+
+**CRITICAL UNDERSTANDING:**
+- You are processing developer journal entries from `content/dev_journal/`
+- Files follow the format: `milestone-name-001.md` (sequential numbering, no dates)
+- Content describes development work but contains NO TIME REFERENCES
+- Focus on the Problem → Solution → Result narrative, not duration
+- Content represents completed work, not ongoing projects
+
+**CRITICAL VOICE ENFORCEMENT:**
+You are writing as a solo developer sharing personal projects. Use ONLY first-person language:
+✅ ALWAYS use "I" language:
+- "I built this system..."
+- "I discovered that..."
+- "I learned..."
+- "I struggled with..."
+- "I found a solution..."
+
+❌ NEVER use "WE" language:
+- Never: "We built", "Our system", "Our solution"
+- Never: "We discovered", "We learned", "We found"
+- Never: "Our integrated", "Our smart", "Our advanced"
+
+❌ NEVER add time references:
+- Never: "took 3 days", "spent hours", "after a week"
+- Never: "recently", "yesterday", "last month"
+- Never: "over the weekend", "in the evening"
+
+This is YOUR personal project that YOU built. Share it authentically in first person without time frames.
+
+---
 
 Your audience is busy business owners who want practical solutions. They may not be highly technical, but they understand business challenges. Your job is to explain solutions in clear, everyday language.
 
@@ -439,6 +599,25 @@ Generate a conversational Facebook post from the content provided. Write it natu
 5. **Be honest about limitations** – don't oversell
 6. **End with a genuine question or observation**
 7. **Minimal emojis** – only when they add clarity
+8. **TARGET 400-600 WORDS** for optimal engagement and readability
+9. **Extract the key narrative** – identify the most compelling business story or insight
+10. **Choose the tone that best fits** – let the content guide your tone selection
+11. **Never mention time frames or duration** – focus on the achievement and its business impact
+
+**IMPORTANT LENGTH REQUIREMENT:**
+Your post must be between 400-600 words to maximize Facebook engagement. This is a firm target, not a suggestion. If your first draft is too short, expand on:
+- More detailed examples
+- Additional context about the problem
+- Specific implementation details (in simple terms)
+- More comprehensive results or impact
+- Personal insights and lessons learned
+
+**Content Processing Instructions:**
+- The markdown content represents a completed development milestone
+- Extract the core problem, solution, and result
+- Ignore any file naming patterns or dates
+- Focus on the technical achievement and its impact
+- Present the work as a finished accomplishment
 
 ---
 
@@ -455,11 +634,10 @@ Generate a conversational Facebook post from the content provided. Write it natu
 **Output Format:**
 
 TONE: [chosen tone name]
-POST: [Facebook post content in clear, conversational language]
+POST: [Facebook post content in clear, conversational language - aim for 400-600 words, no time references]
 REASON: [brief explanation of tone choice and audience fit]
 
-**IMPORTANT:** Keep the language natural and conversational. Avoid hype, excessive enthusiasm, or sales-like language. Focus on practical value and honest communication.
-"""
+**IMPORTANT:** Keep the language natural and conversational. Avoid hype, excessive enthusiasm, or sales-like language. Focus on practical value and honest communication. Write as if YOU built this project yourself without mentioning when or how long it took."""
 
     def _parse_ai_response(self, response: str) -> Dict:
         """Parse the AI response to extract tone, post content, and reason."""
@@ -603,17 +781,10 @@ REASON: [brief explanation of tone choice and audience fit]
                 regeneration_prompt = self._build_regeneration_prompt(markdown_content, feedback, tone_preference)
                 system_prompt = self.prompt_template
             
-            response = self.client.chat.completions.create(
-                model=self.config.openai_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": regeneration_prompt}
-                ],
-                max_tokens=1200,  # Increased for context-aware regeneration
-                temperature=0.8  # Slightly higher temperature for more variation
+            generated_content = self._generate_content(
+                system_prompt, regeneration_prompt, temperature=0.8, max_tokens=2500
             )
             
-            generated_content = response.choices[0].message.content
             parsed_response = self._parse_ai_response(generated_content)
             
             result = {
@@ -621,7 +792,7 @@ REASON: [brief explanation of tone choice and audience fit]
                 'tone_used': parsed_response.get('tone', 'Unknown'),
                 'tone_reason': parsed_response.get('reason', 'No reason provided'),
                 'generated_at': datetime.now().isoformat(),
-                'model_used': self.config.openai_model,
+                'model_used': self.model,
                 'original_markdown': markdown_content,
                 'regenerated_with_feedback': feedback,
                 'is_regeneration': True,
@@ -811,17 +982,10 @@ REASON: [brief explanation of tone choice and audience fit]
             system_prompt = self._get_system_prompt()
             full_prompt = self._build_continuation_prompt(previous_post_text)
 
-            response = self.client.chat.completions.create(
-                model=self.config.openai_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": full_prompt}
-                ],
-                max_tokens=1200,
-                temperature=0.7
+            generated_content = self._generate_content(
+                system_prompt, full_prompt, temperature=0.7, max_tokens=2500
             )
 
-            generated_content = response.choices[0].message.content
             parsed_response = self._parse_ai_response(generated_content)
 
             result = {
@@ -829,7 +993,7 @@ REASON: [brief explanation of tone choice and audience fit]
                 'tone_used': parsed_response.get('tone', 'Unknown'),
                 'tone_reason': parsed_response.get('reason', 'No reason provided'),
                 'generated_at': datetime.now().isoformat(),
-                'model_used': self.config.openai_model,
+                'model_used': self.model,
                 'original_markdown': "Continuation from existing post",
                 'is_context_aware': True,
                 'relationship_type': 'continuation',

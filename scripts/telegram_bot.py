@@ -197,29 +197,35 @@ Need help? Just send a markdown file to begin! 🚀
             # Test connections
             airtable_status = "✅ Connected" if self.airtable.test_connection() else "❌ Failed"
             
+            # Get model information
+            model_info = self.ai_generator.get_model_info()
+            
             # Get recent drafts count
             recent_drafts = self.airtable.get_recent_drafts(limit=5)
             drafts_count = len(recent_drafts)
             
-            status_message = f"""
-📊 **System Status**
+            status_message = f"""📊 System Status
 
-**Services:**
+Services:
 • Airtable: {airtable_status}
-• OpenAI: ✅ Ready
+• AI Provider: ✅ {model_info['provider']}
+• Model: {model_info['model']}
 • Telegram Bot: ✅ Running
 
-**Recent Activity:**
-• Drafts in last 24h: {drafts_count}
-• AI Model: {self.config.openai_model}
+AI Model Details:
+• {model_info['description']}
+• Max tokens: {model_info['max_tokens_supported']}
 
-**System Ready!** 🚀
-            """
-            await update.message.reply_text(status_message, parse_mode='Markdown')
+Recent Activity:
+• Drafts in last 24h: {drafts_count}
+
+System Ready! 🚀"""
+            
+            await update.message.reply_text(status_message)
             
         except Exception as e:
-            error_message = f"❌ **System Error:** {str(e)}"
-            await update.message.reply_text(error_message, parse_mode='Markdown')
+            error_message = f"❌ System Error: {str(e)}"
+            await update.message.reply_text(error_message)
     
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle document uploads."""
@@ -551,9 +557,8 @@ What would you like to do?"""
         """Regenerate the post with general feedback and context awareness."""
         try:
             await query.edit_message_text(
-                "🔄 **Regenerating your post...**\n\n"
-                "⏳ Creating a new version with different approach...",
-                parse_mode='Markdown'
+                "🔄 Regenerating your post...\n\n"
+                "⏳ Creating a new version with different approach..."
             )
             
             # Get context for regeneration
@@ -617,17 +622,17 @@ What would you like to do?"""
                 if post_data.get('relationship_type'):
                     context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
             
-            # Format the message - PLAIN TEXT
-            post_preview = f"""🔄 **Regenerated Post**
+            # Format the message - PLAIN TEXT (no parse_mode)
+            post_preview = f"""🔄 Regenerated Post
 
-**Tone:** {post_data.get('tone_used', 'Unknown')}{context_info}
+Tone: {post_data.get('tone_used', 'Unknown')}{context_info}
 
-**Content:**
+Content:
 ───────────────────────────
 {display_content}
 ───────────────────────────
 
-**AI Reasoning:** {display_reason}
+AI Reasoning: {display_reason}
 
 What would you like to do?"""
             
@@ -637,8 +642,9 @@ What would you like to do?"""
             )
             
         except Exception as e:
+            logger.error(f"Error in _regenerate_post: {str(e)}")
             await query.edit_message_text(
-                f"❌ **Error regenerating post:** {str(e)}"
+                f"❌ Error regenerating post: {str(e)}"
             )
     
     async def _show_tone_options(self, query, session):
@@ -667,9 +673,8 @@ What would you like to do?"""
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            "🎨 **Choose a tone style:**\n\n"
+            "🎨 Choose a tone style:\n\n"
             "Select the tone you'd like for your Facebook post:",
-            parse_mode='Markdown',
             reply_markup=reply_markup
         )
     
@@ -677,9 +682,8 @@ What would you like to do?"""
         """Regenerate post with specific tone and context awareness."""
         try:
             await query.edit_message_text(
-                f"🎨 **Regenerating with '{tone_name}' tone...**\n\n"
-                "⏳ Creating a new version with your selected style...",
-                parse_mode='Markdown'
+                f"🎨 Regenerating with '{tone_name}' tone...\n\n"
+                "⏳ Creating a new version with your selected style..."
             )
             
             # Find the full tone name
@@ -755,15 +759,15 @@ What would you like to do?"""
                 if post_data.get('relationship_type'):
                     context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
             
-            # Format the message - PLAIN TEXT
-            post_preview = f"""🎨 **Regenerated with {selected_tone} Tone**
+            # Format the message - PLAIN TEXT (no parse_mode)
+            post_preview = f"""🎨 Regenerated with {selected_tone} Tone
 
-**Content:**
+Content:
 ───────────────────────────
 {display_content}
 ───────────────────────────
 
-**AI Reasoning:** {display_reason}{context_info}
+AI Reasoning: {display_reason}{context_info}
 
 What would you like to do?"""
             
@@ -774,8 +778,7 @@ What would you like to do?"""
             
         except Exception as e:
             await query.edit_message_text(
-                f"❌ **Error regenerating with tone:** {str(e)}",
-                parse_mode='Markdown'
+                f"❌ Error regenerating with tone: {str(e)}"
             )
     
     async def _cancel_session(self, query, user_id):
@@ -797,7 +800,7 @@ What would you like to do?"""
             
         except Exception as e:
             await query.edit_message_text(
-                f"❌ **Error starting post generation:** {str(e)}"
+                f"❌ Error starting post generation: {str(e)}"
             )
     
     async def _show_relationship_selection(self, query, user_id: int):
@@ -824,22 +827,18 @@ What would you like to do?"""
         
         # Create message based on whether there are previous posts
         if posts_count == 0:
-            message = """
-🎯 **Generate Another Post**
+            message = """🎯 Generate Another Post
 
 This will be your first related post in the series.
 
-**Choose relationship type for your next post:**
-            """
+Choose relationship type for your next post:"""
         else:
-            message = f"""
-🎯 **Generate Another Post**
+            message = f"""🎯 Generate Another Post
 
 Series: {posts_count} posts created
 Building on: {session.get('filename', 'your project')}
 
-**Choose relationship type for your next post:**
-            """
+Choose relationship type for your next post:"""
         
         # Create inline keyboard with relationship types
         keyboard = [
@@ -864,7 +863,6 @@ Building on: {session.get('filename', 'your project')}
         
         await query.edit_message_text(
             message,
-            parse_mode='Markdown',
             reply_markup=reply_markup
         )
     
@@ -911,13 +909,11 @@ Building on: {session.get('filename', 'your project')}
             await self._confirm_generation(query, user_id)
             return
         
-        message = f"""
-🎯 **Choose Previous Post to Build On**
+        message = f"""🎯 Choose Previous Post to Build On
 
-**Selected Relationship:** {relationship_type}
+Selected Relationship: {relationship_type}
 
-**Choose which post to build upon:**
-        """
+Choose which post to build upon:"""
         
         # Create buttons for each previous post
         keyboard = []
@@ -934,7 +930,6 @@ Building on: {session.get('filename', 'your project')}
         
         await query.edit_message_text(
             message,
-            parse_mode='Markdown',
             reply_markup=reply_markup
         )
 
@@ -1005,22 +1000,20 @@ Building on: {session.get('filename', 'your project')}
             'Weak': '🔴'
         }.get(connection_strength, '🔗')
         
-        message = f"""
-🎯 **Ready to Generate Post**
+        message = f"""🎯 Ready to Generate Post
 
-{relationship_emoji} **Relationship:** {relationship_type}
-📊 **Connection Strength:** {strength_emoji} {connection_strength}
-🔗 **Building on:** Post {selected_post['post_id']} ({selected_post['tone_used']} tone)
+{relationship_emoji} Relationship: {relationship_type}
+📊 Connection Strength: {strength_emoji} {connection_strength}
+🔗 Building on: Post {selected_post['post_id']} ({selected_post['tone_used']} tone)
 
-**Previous post preview:** {selected_post['content_summary'][:80]}...
+Previous post preview: {selected_post['content_summary'][:80]}...
 
-**Connection Preview:**
+Connection Preview:
 {connection_preview}
 
-**Reading Sequence:** {reading_sequence}
+Reading Sequence: {reading_sequence}
 
-Ready to generate your new post?
-        """
+Ready to generate your new post?"""
         
         keyboard = [
             [
@@ -1032,7 +1025,6 @@ Ready to generate your new post?
         
         await query.edit_message_text(
             message,
-            parse_mode='Markdown',
             reply_markup=reply_markup
         )
     
@@ -1324,8 +1316,7 @@ What would you like to do?"""
             # Default behavior for unexpected text
             await update.message.reply_text(
                 "Thanks for your message! If you want to generate a post, please send me a `.md` file. "
-                "Use `/help` to see all commands.",
-                parse_mode='Markdown'
+                "Use `/help` to see all commands."
             )
 
     async def _handle_continuation_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE, previous_post_text: str):
@@ -1334,8 +1325,7 @@ What would you like to do?"""
         session = self.user_sessions[user_id]
         
         await update.message.reply_text(
-            "⏳ Analyzing your post and generating a follow-up... this might take a moment.",
-            parse_mode='Markdown'
+            "⏳ Analyzing your post and generating a follow-up... this might take a moment."
         )
         
         try:
@@ -1358,8 +1348,7 @@ What would you like to do?"""
         except Exception as e:
             logger.error(f"Error generating continuation post: {e}", exc_info=True)
             await update.message.reply_text(
-                f"❌ An error occurred while generating the follow-up post: {e}",
-                parse_mode='Markdown'
+                f"❌ An error occurred while generating the follow-up post: {e}"
             )
             session['state'] = None
 
@@ -2000,7 +1989,11 @@ Use filter: `Post Series ID = {series_id}`
             self.config.validate_config()
             
             logger.info("Starting Facebook Content Generator Bot...")
-            logger.info(f"Using OpenAI model: {self.config.openai_model}")
+            
+            # Log the correct AI provider and model
+            model_info = self.ai_generator.get_model_info()
+            logger.info(f"Using {model_info['provider']} model: {model_info['model']}")
+            logger.info(f"Model description: {model_info['description']}")
             
             # Test Airtable connection
             if not self.airtable.test_connection():
@@ -2024,9 +2017,8 @@ Use filter: `Post Series ID = {series_id}`
         self.user_sessions[user_id]['state'] = 'awaiting_continuation_input'
         
         await update.message.reply_text(
-            "📝 **Content Continuation**\n\n"
-            "Please paste the full text of the Facebook post you want to continue. I'll analyze it and generate a natural follow-up for you.",
-            parse_mode='Markdown'
+            "📝 Content Continuation\n\n"
+            "Please paste the full text of the Facebook post you want to continue. I'll analyze it and generate a natural follow-up for you."
         )
     
     async def _handle_post_action(self, query, user_id: int, action: str):
@@ -2229,11 +2221,10 @@ Are you sure you want to delete this post?
             self._update_session_context(query.from_user.id)
             
             await query.edit_message_text(
-                f"✅ **Post {post_id} regenerated successfully**\n\n"
-                f"**New tone:** {post_data.get('tone_used', 'Unknown')}\n"
-                f"**Content preview:** {post_data.get('post_content', '')[:100]}...\n\n"
-                f"The post has been updated in your series and Airtable.",
-                parse_mode='Markdown'
+                f"✅ Post {post_id} regenerated successfully\n\n"
+                f"New tone: {post_data.get('tone_used', 'Unknown')}\n"
+                f"Content preview: {post_data.get('post_content', '')[:100]}...\n\n"
+                f"The post has been updated in your series and Airtable."
             )
             
             # Return to series overview after 3 seconds
@@ -2242,8 +2233,7 @@ Are you sure you want to delete this post?
             
         except Exception as e:
             await query.edit_message_text(
-                f"❌ **Error regenerating post:** {str(e)}",
-                parse_mode='Markdown'
+                f"❌ Error regenerating post: {str(e)}"
             )
     
     async def _view_individual_post(self, query, session, post_id: int):
