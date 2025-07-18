@@ -1,0 +1,19 @@
+services:
+  - type: background
+    name: facebook-content-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scripts/telegram_bot.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.9.16
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: AIRTABLE_API_KEY
+        sync: false
+      - key: AIRTABLE_BASE_ID
+        sync: false
+      - key: AIRTABLE_TABLE_NAME
+        sync: false 

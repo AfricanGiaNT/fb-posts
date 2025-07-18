@@ -3,11 +3,16 @@ Main Telegram Bot for AI Facebook Content Generator
 """
 
 import logging
+import os
 from pathlib import Path
 from datetime import datetime
 import asyncio
 import uuid
+import random
+import httpx
 from typing import Dict, Optional, List
+from io import BytesIO
+from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Document
 from telegram.ext import (
@@ -18,6 +23,9 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+from telegram.request import HTTPXRequest, BaseRequest
+from telegram.error import TimedOut, NetworkError, RetryAfter
+from telegram.constants import ParseMode
 
 from config_manager import ConfigManager
 from ai_content_generator import AIContentGenerator
@@ -30,19 +38,84 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class RetryingRequest(HTTPXRequest):
+    """Custom request handler with retry logic for failed requests"""
+    
+    def __init__(self, *args, **kwargs):
+        # Extract timeout settings - only use supported parameters
+        supported_kwargs = {}
+        
+        # Extract known supported parameters
+        if 'read_timeout' in kwargs:
+            supported_kwargs['read_timeout'] = kwargs.pop('read_timeout')
+        if 'write_timeout' in kwargs:
+            supported_kwargs['write_timeout'] = kwargs.pop('write_timeout')
+        if 'connect_timeout' in kwargs:
+            supported_kwargs['connect_timeout'] = kwargs.pop('connect_timeout')
+        if 'pool_timeout' in kwargs:
+            supported_kwargs['pool_timeout'] = kwargs.pop('pool_timeout')
+        
+        # Remove any unsupported kwargs that might cause issues
+        kwargs.pop('http2', None)
+        kwargs.pop('limits', None)
+        kwargs.pop('connection_pool_size', None)
+        
+        # Initialize with only supported parameters
+        super().__init__(*args, **supported_kwargs)
+        
+        # Store settings for retry logic
+        self.max_retries = 5
+        self.base_delay = 1.0
+        self.max_delay = 30.0
+
+    async def do_request(self, *args, **kwargs):
+        """Perform request with retry logic"""
+        attempt = 0
+        last_exception = None
+        
+        while attempt < self.max_retries:
+            try:
+                # Attempt the request
+                return await super().do_request(*args, **kwargs)
+                
+            except Exception as e:
+                attempt += 1
+                last_exception = e
+                
+                if attempt < self.max_retries:
+                    # Calculate delay with exponential backoff and jitter
+                    delay = min(self.base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.1), self.max_delay)
+                    logger.warning(f"Request failed (attempt {attempt}/{self.max_retries}): {str(e)}. Retrying in {delay:.1f}s")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"Request failed after {self.max_retries} attempts: {str(e)}")
+                    raise last_exception
+
 class FacebookContentBot:
     """Main bot class for handling Telegram interactions."""
     
     def __init__(self):
+        """Initialize the bot with configuration."""
+        # Load config and services
         self.config = ConfigManager()
         self.ai_generator = AIContentGenerator(self.config)
         self.airtable = AirtableConnector(self.config)
         
-        # User session storage (in production, use Redis or database)
-        self.user_sessions: Dict[int, Dict] = {}
+        # Configure request parameters with longer timeouts
+        request = RetryingRequest(
+            read_timeout=30.0,
+            write_timeout=30.0,
+            connect_timeout=20.0,
+            pool_timeout=20.0
+        )
         
-        # Initialize the bot application
-        self.application = Application.builder().token(self.config.telegram_bot_token).build()
+        # Initialize bot and application
+        self.application = Application.builder().token(self.config.telegram_bot_token).request(request).build()
+        
+        # Initialize user sessions
+        self.user_sessions = {}
+        
+        # Set up command handlers
         self._setup_handlers()
     
     def _setup_handlers(self):
@@ -53,6 +126,11 @@ class FacebookContentBot:
         self.application.add_handler(CommandHandler("status", self._status_command))
         self.application.add_handler(CommandHandler("series", self._series_command))
         self.application.add_handler(CommandHandler("continue", self._continue_command))
+        self.application.add_handler(CommandHandler("batch", self._batch_command))
+        self.application.add_handler(CommandHandler("project", self._project_command))
+        self.application.add_handler(CommandHandler("done", self._done_command))
+        self.application.add_handler(CommandHandler("strategy", self._strategy_command))
+        self.application.add_handler(CommandHandler("cancel", self._cancel_batch_command))
         
         # Document/file handler
         self.application.add_handler(MessageHandler(filters.Document.ALL, self._handle_document))
@@ -110,7 +188,7 @@ class FacebookContentBot:
         self._update_session_context(user_id)
     
     def _update_session_context(self, user_id: int):
-        """Update the session context for AI continuity."""
+        """Update the session context for AI continuity with 5-post limit."""
         if user_id not in self.user_sessions:
             return
         
@@ -121,14 +199,17 @@ class FacebookContentBot:
             session['session_context'] = ""
             return
         
+        # Limit context to last 5 posts for better performance and focus
+        recent_posts = posts[-5:]
+        
         # Create context summary for AI
         context_parts = [
-            f"Series: {len(posts)} posts created from {session['filename']}",
+            f"Series: {len(recent_posts)}/{len(posts)} posts created from {session['filename']}",
             f"Original project: {session['original_markdown'][:200]}...",
             ""
         ]
         
-        for post in posts:
+        for post in recent_posts:
             context_parts.append(f"Post {post['post_id']}: {post['tone_used']} tone")
             context_parts.append(f"Content: {post['content_summary']}")
             if post['relationship_type']:
@@ -137,59 +218,139 @@ class FacebookContentBot:
         
         session['session_context'] = "\n".join(context_parts)
     
+    def _escape_markdown(self, text: str) -> str:
+        """Escape special characters for MarkdownV2 format."""
+        special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        for char in special_chars:
+            text = text.replace(char, f'\\{char}')
+        return text
+
+    def _format_message(self, text: str, use_markdown: bool = False) -> Dict[str, str]:
+        """Format message with proper escaping and parse mode."""
+        if not use_markdown:
+            return {'text': text, 'parse_mode': None}
+        
+        escaped_text = self._escape_markdown(text)
+        return {'text': escaped_text, 'parse_mode': ParseMode.MARKDOWN_V2}
+
+    async def _send_formatted_message(self, update_or_query, text: str, use_markdown: bool = False, 
+                                    reply_markup: Optional[InlineKeyboardMarkup] = None, document: Optional[BytesIO] = None):
+        """Send a properly formatted message with error handling."""
+        try:
+            message_params = self._format_message(text, use_markdown)
+            
+            if document:
+                # Send document with caption
+                if isinstance(update_or_query, Update):
+                    return await update_or_query.message.reply_document(
+                        document=document,
+                        caption=message_params['text'][:1024],  # Telegram caption limit
+                        parse_mode=message_params.get('parse_mode'),
+                        reply_markup=reply_markup
+                    )
+                else:
+                    # Can't edit a message to include a document, send new message
+                    return await update_or_query.message.reply_document(
+                        document=document,
+                        caption=message_params['text'][:1024],
+                        parse_mode=message_params.get('parse_mode'),
+                        reply_markup=reply_markup
+                    )
+            
+            # Regular text message
+            if isinstance(update_or_query, Update):
+                return await update_or_query.message.reply_text(
+                    **message_params,
+                    reply_markup=reply_markup
+                )
+            elif hasattr(update_or_query, 'message'):  # CallbackQuery
+                try:
+                    # Try to edit existing message
+                    return await update_or_query.message.edit_text(
+                        **message_params,
+                        reply_markup=reply_markup
+                    )
+                except Exception as edit_error:
+                    # If editing fails, send a new message
+                    logger.warning(f"Failed to edit message: {edit_error}")
+                    return await update_or_query.message.reply_text(
+                        **message_params,
+                        reply_markup=reply_markup
+                    )
+            else:  # Message object
+                return await update_or_query.reply_text(
+                    **message_params,
+                    reply_markup=reply_markup
+                )
+                
+        except Exception as e:
+            logger.error(f"Failed to send formatted message: {str(e)}")
+            # Send plain text as fallback
+            try:
+                fallback_text = text[:4000]  # Truncate if too long
+                if isinstance(update_or_query, Update):
+                    return await update_or_query.message.reply_text(
+                        text=fallback_text,
+                        reply_markup=reply_markup
+                    )
+                elif hasattr(update_or_query, 'message'):
+                    return await update_or_query.message.reply_text(
+                        text=fallback_text,
+                        reply_markup=reply_markup
+                    )
+                else:
+                    return await update_or_query.reply_text(
+                        text=fallback_text,
+                        reply_markup=reply_markup
+                    )
+            except Exception as fallback_error:
+                logger.error(f"Failed to send fallback message: {fallback_error}")
+                return None
+
     async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command."""
-        welcome_message = """
-🚀 **Welcome to the AI Facebook Content Generator!**
-
-I help you transform your Markdown project documentation into engaging Facebook posts using AI.
-
-**How it works:**
-1. Send me a `.md` file with your project documentation
-2. I'll analyze it and generate a Facebook post using one of 5 brand tones
-3. You can review, approve, or ask me to regenerate
-4. Approved posts are saved to your Airtable for publishing
-
-**Commands:**
-• `/help` - Show this help message
-• `/status` - Check system status
-
-**Ready to get started?** 
-Just send me a markdown file! 📄
-        """
-        await update.message.reply_text(welcome_message, parse_mode='Markdown')
+        welcome_message = (
+            "🚀 Welcome to the AI Facebook Content Generator!\n\n"
+            "I help you transform your Markdown project documentation into engaging Facebook posts using AI.\n\n"
+            "How it works:\n"
+            "1. Send me a .md file with your project documentation\n"
+            "2. I'll analyze it and generate a Facebook post using one of 5 brand tones\n"
+            "3. You can review, approve, or ask me to regenerate\n"
+            "4. Approved posts are saved to your Airtable for publishing\n\n"
+            "Commands:\n"
+            "• /help - Show this help message\n"
+            "• /status - Check system status\n\n"
+            "Ready to get started?\n"
+            "Just send me a markdown file! 📄"
+        )
+        await self._send_formatted_message(update, welcome_message)
     
     async def _help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command."""
-        help_message = """
-🎯 **AI Facebook Content Generator Help**
-
-**How to use:**
-1. **Send a markdown file** (.md or .mdc extension)
-2. **Choose a tone** (optional) or let AI decide
-3. **Review the generated post**
-4. **Approve** ✅ or **Regenerate** 🔄
-
-**Brand Tones Available:**
-• 🧩 Behind-the-Build
-• 💡 What Broke
-• 🚀 Finished & Proud
-• 🎯 Problem → Solution → Result
-• 📓 Mini Lesson
-
-**File Requirements:**
-• `.md` or `.mdc` file extension
-• Max size: 10MB
-• Text content about your automation/AI projects
-
-**Commands:**
-• `/start` - Welcome message
-• `/status` - Check system status
-• `/help` - This help message
-
-Need help? Just send a markdown file to begin! 🚀
-        """
-        await update.message.reply_text(help_message, parse_mode='Markdown')
+        help_message = (
+            "🎯 AI Facebook Content Generator Help\n\n"
+            "How to use:\n"
+            "1. Send a markdown file (.md or .mdc extension)\n"
+            "2. Choose a tone (optional) or let AI decide\n"
+            "3. Review the generated post\n"
+            "4. Approve ✅ or Regenerate 🔄\n\n"
+            "Brand Tones Available:\n"
+            "• 🧩 Behind-the-Build\n"
+            "• 💡 What Broke\n"
+            "• 🚀 Finished & Proud\n"
+            "• 🎯 Problem → Solution → Result\n"
+            "• 📓 Mini Lesson\n\n"
+            "File Requirements:\n"
+            "• .md or .mdc file extension\n"
+            "• Max size: 10MB\n"
+            "• Text content about your automation/AI projects\n\n"
+            "Commands:\n"
+            "• /start - Welcome message\n"
+            "• /status - Check system status\n"
+            "• /help - This help message\n\n"
+            "Need help? Just send a markdown file to begin! 🚀"
+        )
+        await self._send_formatted_message(update, help_message)
     
     async def _status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /status command."""
@@ -221,11 +382,11 @@ Recent Activity:
 
 System Ready! 🚀"""
             
-            await update.message.reply_text(status_message)
+            await self._send_formatted_message(update, status_message)
             
         except Exception as e:
             error_message = f"❌ System Error: {str(e)}"
-            await update.message.reply_text(error_message)
+            await self._send_formatted_message(update, error_message)
     
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle document uploads."""
@@ -234,47 +395,64 @@ System Ready! 🚀"""
         
         # Validate file
         if not (document.file_name.endswith('.md') or document.file_name.endswith('.mdc')):
-            await update.message.reply_text(
-                "❌ Please send a `.md` or `.mdc` (Markdown) file only.",
-                parse_mode='Markdown'
-            )
+            await self._send_formatted_message(update, "❌ Please send a `.md` or `.mdc` (Markdown) file only.")
             return
         
         if document.file_size > self.config.max_file_size_mb * 1024 * 1024:
-            await update.message.reply_text(
-                f"❌ File too large. Max size: {self.config.max_file_size_mb}MB",
-                parse_mode='Markdown'
-            )
+            await self._send_formatted_message(update, f"❌ File too large. Max size: {self.config.max_file_size_mb}MB")
             return
         
         try:
             # Send processing message
-            processing_msg = await update.message.reply_text(
-                "📄 **Processing your markdown file...**\n\n"
-                "⏳ Analyzing content and preparing to generate your post...",
-                parse_mode='Markdown'
-            )
+            processing_msg = await self._send_formatted_message(update, "📄 **Processing your markdown file...**\n\n"
+                "⏳ Analyzing content...")
             
             # Download and read the file
             file = await document.get_file()
             file_content = await file.download_as_bytearray()
             markdown_content = file_content.decode('utf-8')
             
-            # Initialize or update session
-            session = self._initialize_session(user_id, markdown_content, document.file_name)
-            
-            # Delete processing message
-            await processing_msg.delete()
-            
-            # Generate post immediately
-            await self._generate_and_show_post(update, context, markdown_content)
+            # Check if we're in batch mode
+            session = self.user_sessions.get(user_id, {})
+            if session.get('mode') == 'multi' and session.get('state') == 'collecting_files':
+                # Handle batch mode upload
+                if len(session.get('files', [])) >= 8:
+                    await self._send_formatted_message(processing_msg, "❌ Maximum number of files (8) reached. Use /done to proceed.")
+                    return
+                
+                # Add file to batch
+                file_data = {
+                    'file_id': str(uuid.uuid4()),
+                    'filename': document.file_name,
+                    'content': markdown_content,
+                    'upload_timestamp': datetime.now().isoformat(),
+                    'processing_status': 'pending'
+                }
+                
+                if 'files' not in session:
+                    session['files'] = []
+                session['files'].append(file_data)
+                session['last_activity'] = datetime.now().isoformat()
+                
+                # Update processing message with batch status
+                files_count = len(session['files'])
+                await self._send_formatted_message(processing_msg, f"✅ **File {files_count}/8 Added to Batch**\n\n"
+                    f"📁 {document.file_name}\n"
+                    f"📊 Size: {document.file_size/1024:.1f}KB\n\n"
+                    "Upload more files or use:\n"
+                    "• `/project` - Generate project overview\n"
+                    "• `/strategy` - Show content strategy\n"
+                    "• `/done` - Finish uploading and proceed")
+                
+            else:
+                # Single file mode
+                session = self._initialize_session(user_id, markdown_content, document.file_name)
+                await processing_msg.delete()
+                await self._show_initial_tone_selection(update, context, session)
             
         except Exception as e:
             logger.error(f"Error processing document: {str(e)}")
-            await update.message.reply_text(
-                f"❌ **Error processing file:** {str(e)}",
-                parse_mode='Markdown'
-            )
+            await self._send_formatted_message(update, f"❌ **Error processing file:** {str(e)}")
 
     async def _generate_and_show_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
                                      markdown_content: str, tone_preference: Optional[str] = None,
@@ -293,7 +471,7 @@ System Ready! 🚀"""
                 session_context = session.get('session_context', '')
                 previous_posts = session.get('posts', [])
             
-            # Generate the post with context awareness
+            # Generate the post with context awareness and business audience
             if is_regeneration and tone_preference:
                 post_data = self.ai_generator.regenerate_post(
                     markdown_content, 
@@ -302,7 +480,8 @@ System Ready! 🚀"""
                     session_context=session_context,
                     previous_posts=previous_posts,
                     relationship_type=relationship_type,
-                    parent_post_id=parent_post_id
+                    parent_post_id=parent_post_id,
+                    audience_type='business'
                 )
             else:
                 post_data = self.ai_generator.generate_facebook_post(
@@ -311,11 +490,21 @@ System Ready! 🚀"""
                     session_context=session_context,
                     previous_posts=previous_posts,
                     relationship_type=relationship_type,
-                    parent_post_id=parent_post_id
+                    parent_post_id=parent_post_id,
+                    audience_type='business'
                 )
             
             # Store in session
             self.user_sessions[user_id]['current_draft'] = post_data
+            
+            # Show the post to the user - create a response object for the update
+            post_content = post_data.get('post_content', 'No content generated')
+            tone_used = post_data.get('tone_used', 'Unknown')
+            tone_reason = post_data.get('tone_reason', 'No reason provided')
+            
+            # Limit content display to prevent message overflow
+            display_content = post_content[:1000] + "..." if len(post_content) > 1000 else post_content
+            display_reason = tone_reason[:200] + "..." if len(tone_reason) > 200 else tone_reason
             
             # Create inline keyboard for user actions
             keyboard = [
@@ -330,35 +519,10 @@ System Ready! 🚀"""
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # Get post content and ensure it's not too long - NO ESCAPING
-            post_content = post_data.get('post_content', 'No content generated')
-            tone_reason = post_data.get('tone_reason', 'No reason provided')
-            
-            # Truncate content if needed for Telegram display
-            if len(post_content) > 2000:  # Leave room for other message parts
-                display_content = post_content[:2000] + "\n\n📝 [Content truncated for display - full version saved to Airtable]"
-            else:
-                display_content = post_content
-            
-            # Truncate reasoning if needed
-            if len(tone_reason) > 500:
-                display_reason = tone_reason[:500] + "..."
-            else:
-                display_reason = tone_reason
-            
-            # Add context-aware information to the display
-            context_info = ""
-            if post_data.get('is_context_aware', False):
-                context_info = f"\n\n🔗 Context-Aware Generation"
-                if relationship_type:
-                    context_info += f"\n• Relationship: {relationship_type}"
-                if previous_posts:
-                    context_info += f"\n• Building on {len(previous_posts)} previous posts"
-            
-            # Format the message - PLAIN TEXT
+            # Create the message
             post_preview = f"""🎯 Generated Facebook Post
 
-Tone Used: {post_data.get('tone_used', 'Unknown')}{context_info}
+Tone: {tone_used}
 
 Content:
 ───────────────────────────
@@ -369,103 +533,1154 @@ AI Reasoning: {display_reason}
 
 What would you like to do?"""
             
-            # Final safety check and truncation
-            post_preview = self._truncate_message(post_preview)
-            
-            # Send the message with plain text (no parse_mode)
-            try:
-                await update.message.reply_text(
-                    post_preview,
-                    reply_markup=reply_markup
-                )
-            except Exception as telegram_error:
-                # If Telegram fails, try without reply_markup
-                try:
-                    await update.message.reply_text(
-                        post_preview + "\n\n❌ Button interface failed - please send a new file."
-                    )
-                except Exception as fallback_error:
-                    # Last resort - send simple error message
-                    await update.message.reply_text(
-                        "✅ Post generated successfully but display failed. Please try again."
-                    )
+            await self._send_formatted_message(update, self._truncate_message(post_preview), reply_markup=reply_markup)
             
         except Exception as e:
-            logger.error(f"Error in _generate_and_show_post: {str(e)}")
-            try:
-                await update.message.reply_text(
-                    f"❌ Error generating post: {str(e)}"
-                )
-            except Exception:
-                # If even error message fails, log it
-                logger.error(f"Failed to send error message: {str(e)}")
+            logger.error(f"Error generating post: {str(e)}")
+            await self._send_formatted_message(update, f"❌ Error generating post: {str(e)}")
     
+    async def _show_generated_post(self, query, post_data: Dict, session: Dict):
+        """Show the generated post with standard review options."""
+        # Get post content and ensure it's not too long
+        post_content = post_data.get('post_content', 'No content generated')
+        tone_used = post_data.get('tone_used', 'Unknown')
+        tone_reason = post_data.get('tone_reason', 'No reason provided')
+        
+        # Context information
+        context_info = ""
+        if session.get('posts'):
+            context_info = f" (Post #{session['post_count'] + 1} in series)"
+        
+        # Use consistent content formatting
+        display_content, display_reason = self._format_content_for_display(post_content, tone_reason)
+        
+        # Create inline keyboard
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data="approve"),
+                InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
+            ],
+            [
+                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cancel")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Create the message
+        post_preview = f"""🎯 Generated Facebook Post
+
+Tone Used: {tone_used}{context_info}
+
+Content:
+───────────────────────────
+{display_content}
+───────────────────────────
+
+AI Reasoning: {display_reason}
+
+What would you like to do?"""
+        
+        await self._send_formatted_message(query, self._truncate_message(post_preview), reply_markup=reply_markup)
+    
+    def _format_content_for_display(self, post_content: str, tone_reason: str):
+        """Format post content and tone reason for display."""
+        # Limit content display to prevent message overflow
+        display_content = post_content[:3000] + "..." if len(post_content) > 3000 else post_content
+        display_reason = tone_reason[:200] + "..." if len(tone_reason) > 200 else tone_reason
+        
+        return display_content, display_reason
+
+    async def _send_new_post_message_from_update(self, update: Update, post_data: Dict, session: Dict):
+        """Send a new post message from an Update object (not CallbackQuery)."""
+        # This is similar to _show_generated_post but works with Update objects
+        post_content = post_data.get('post_content', 'No content generated')
+        tone_used = post_data.get('tone_used', 'Unknown')
+        tone_reason = post_data.get('tone_reason', 'No reason provided')
+        
+        # Context information
+        context_info = ""
+        if session.get('posts'):
+            context_info = f" (Post #{session['post_count'] + 1} in series)"
+        
+        # Use consistent content formatting
+        display_content, display_reason = self._format_content_for_display(post_content, tone_reason)
+        
+        # Create inline keyboard
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data="approve"),
+                InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
+            ],
+            [
+                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cancel")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Create the message
+        post_preview = f"""🎯 Generated Facebook Post
+
+Tone Used: {tone_used}{context_info}
+
+Content:
+───────────────────────────
+{display_content}
+───────────────────────────
+
+AI Reasoning: {display_reason}
+
+What would you like to do?"""
+        
+        await self._send_formatted_message(update, self._truncate_message(post_preview), reply_markup=reply_markup)
+    
+    def _create_callback_data(self, action: str, **kwargs) -> str:
+        """Create standardized callback data string."""
+        data = {'action': action}
+        data.update(kwargs)
+        # Convert to string, max 64 bytes as per Telegram limits
+        return str(data)[:64]
+
+    def _parse_callback_data(self, callback_data: str) -> Dict:
+        """Parse callback data string into dictionary."""
+        try:
+            # Handle empty callback data
+            if not callback_data:
+                logger.warning("Empty callback data received")
+                return {'action': 'error', 'reason': 'empty_data'}
+            
+            # If the data is a simple string (not a dict format)
+            if not (callback_data.startswith('{') and callback_data.endswith('}')):
+                return {'action': callback_data}
+            
+            # Remove curly braces and split by comma
+            data_str = callback_data.strip('{}')
+            parts = data_str.split(',')
+            
+            # Parse each key-value pair
+            data = {}
+            for part in parts:
+                if ':' in part:
+                    key, value = part.split(':', 1)
+                    data[key.strip(" '")] = value.strip(" '")
+            
+            return data
+        except Exception as e:
+            logger.error(f"Error parsing callback data: {str(e)}")
+            return {'action': 'error', 'reason': str(e)}
+
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle inline button callbacks."""
+        """Handle callback queries with error handling."""
         query = update.callback_query
-        await query.answer()
+        user_id = query.from_user.id
         
+        try:
+            # Parse callback data
+            callback_data = query.data
+            
+            # Handle file selection callbacks
+            if callback_data.startswith('select_file_'):
+                if user_id in self.user_sessions:
+                    await self._handle_file_selection(query, self.user_sessions[user_id])
+                return
+            
+            # Handle initial tone selection callbacks
+            if callback_data.startswith('initial_'):
+                if user_id in self.user_sessions:
+                    await self._handle_initial_tone_selection(query, self.user_sessions[user_id], callback_data)
+                return
+            
+            # Handle tone change callbacks
+            if callback_data.startswith('tone_'):
+                if user_id in self.user_sessions:
+                    await self._handle_tone_change_selection(query, self.user_sessions[user_id], callback_data)
+                return
+            
+            # Handle other special callbacks
+            if callback_data == "show_tone_previews":
+                if user_id in self.user_sessions:
+                    await self._show_tone_previews(query, self.user_sessions[user_id])
+                return
+            
+            if callback_data == "back_to_initial_tone_selection":
+                if user_id in self.user_sessions:
+                    await self._show_initial_tone_selection_from_callback(query, self.user_sessions[user_id])
+                return
+            
+            # Handle strategy callbacks  
+            if callback_data in ["cancel_strategy", "use_ai_strategy", "customize_strategy", "manual_selection"]:
+                if user_id in self.user_sessions:
+                    await self._handle_strategy_callback(query, self.user_sessions[user_id])
+                return
+            
+            # Handle follow-up relationship selection callbacks
+            if callback_data.startswith('followup_rel_'):
+                if user_id in self.user_sessions:
+                    relationship_type = callback_data.replace('followup_rel_', '')
+                    await self._handle_followup_relationship_selection(query, self.user_sessions[user_id], relationship_type)
+                return
+            
+            # Parse other callback data
+            callback_data = self._parse_callback_data(callback_data)
+            action = callback_data.get('action', '')
+            
+            # Log the action for debugging
+            logger.info(f"Handling callback action: {action}")
+            
+            # Handle session expiry
+            if user_id not in self.user_sessions and action not in ['start', 'help', 'error']:
+                await self._send_formatted_message(query, "❌ Session expired. Please start a new session.")
+                return
+            
+            # Get session if exists
+            session = self.user_sessions.get(user_id, {})
+            
+            # Map actions to handlers
+            action_handlers = {
+                'approve': lambda: self._approve_post(query, session),
+                'regenerate': lambda: self._regenerate_post(query, session),
+                'cancel': lambda: self._cancel_session(query, user_id),
+                'change_tone': lambda: self._show_tone_options(query, session),
+                'tone': lambda: self._handle_tone_selection(query, session, callback_data),
+                'strategy': lambda: self._handle_strategy_callback(query, session),
+                'export': lambda: self._handle_export_action(query, user_id, callback_data.get('type', '')),
+                'series': lambda: self._handle_series_action(query, user_id, callback_data.get('type', '')),
+                'post': lambda: self._handle_post_action(query, user_id, callback_data.get('type', '')),
+                'error': lambda: self._handle_error_callback(query, callback_data.get('reason', 'unknown')),
+                'use_ai_strategy': lambda: self._handle_ai_strategy(query, session),
+                'customize_strategy': lambda: self._show_strategy_customization(query, session),
+                'manual_selection': lambda: self._show_manual_file_selection(query, session),
+                'manual_generate': lambda: self._handle_manual_generation(query, session),
+                'manual_clear': lambda: self._handle_manual_clear(query, session),
+                'back_to_strategy': lambda: self._show_strategy_options(query, session),
+                'view_batch_posts': lambda: self._view_batch_posts(query, session),
+                'export_batch': lambda: self._export_batch_series(query, session),
+                'new_batch': lambda: self._start_new_batch(query, user_id),
+                'back_to_post': lambda: self._show_current_post(query, session),
+                # New follow-up post handlers
+                'generate_followup': lambda: self._handle_followup_generation(query, session),
+                'view_series': lambda: self._view_series(query, session),
+                'export_current': lambda: self._export_current_post(query, session),
+                'done_session': lambda: self._done_session(query, session),
+                'cancel_followup': lambda: self._cancel_followup(query, session),
+                'back_to_options': lambda: self._show_post_approval_options(query, session),
+                'export_series': lambda: self._export_series(query, session)
+            }
+            
+            # Get and execute handler
+            handler = action_handlers.get(action)
+            if handler:
+                await handler()
+            else:
+                logger.warning(f"Unknown callback action: {action}")
+                await self._send_formatted_message(query, "❌ Invalid action. Please try again.")
+            
+        except Exception as e:
+            logger.error(f"Error handling callback: {str(e)}", exc_info=True)
+            try:
+                await self._send_formatted_message(
+                    query,
+                    "❌ An error occurred. Please try again or start a new session."
+                )
+            except Exception as e2:
+                logger.error(f"Error sending error message: {str(e2)}")
+
+    async def _handle_error_callback(self, query, reason: str = 'unknown'):
+        """Handle error callbacks gracefully."""
+        error_messages = {
+            'empty_data': "❌ Invalid callback data received",
+            'unknown': "❌ There was an error processing your request"
+        }
+        message = error_messages.get(reason, error_messages['unknown'])
+        await self._send_formatted_message(query, f"{message}. Please try again.")
+
+    async def _handle_tone_selection(self, query, session: Dict, callback_data: Dict):
+        """Handle tone selection with error handling."""
+        try:
+            tone = callback_data.get('tone', '')
+            if tone == 'ai':
+                await self._generate_with_ai_chosen_tone(query, session)
+            else:
+                await self._generate_with_initial_tone(query, session, tone)
+        except Exception as e:
+            logger.error(f"Error handling tone selection: {str(e)}")
+            await self._send_formatted_message(
+                query,
+                "❌ Error selecting tone. Please try again."
+            )
+    
+    async def _handle_tone_change_selection(self, query, session: Dict, callback_data: str):
+        """Handle tone change selection from the change tone interface."""
+        try:
+            # Extract tone from callback data (e.g., "tone_mini_lesson" -> "mini_lesson")
+            tone_key = callback_data.replace("tone_", "")
+            
+            # Map callback data back to proper tone names
+            tone_mapping = {
+                "behind_the_build": "Behind-the-Build",
+                "what_broke": "What Broke", 
+                "finished_proud": "Finished & Proud",
+                "problem_solution_result": "Problem → Solution → Result",
+                "mini_lesson": "Mini Lesson"
+            }
+            
+            # Get the actual tone name
+            actual_tone = tone_mapping.get(tone_key, tone_key.replace("_", " ").title())
+            
+            # Regenerate with the selected tone
+            await self._regenerate_with_tone(query, session, actual_tone)
+            
+        except Exception as e:
+            logger.error(f"Error handling tone change selection: {str(e)}")
+            await self._send_formatted_message(
+                query,
+                "❌ Error changing tone. Please try again."
+            )
+
+    async def _handle_series_action(self, query, user_id: int, action_type: str):
+        """Handle series-related actions with error handling."""
+        try:
+            if action_type == 'view':
+                await self._show_series_overview(query, None)
+            elif action_type == 'export':
+                await self._show_export_options(query, self.user_sessions[user_id])
+            elif action_type == 'manage':
+                await self._show_post_management(query, user_id)
+            else:
+                await self._send_formatted_message(
+                    query,
+                    "❌ Invalid series action. Please try again."
+                )
+        except Exception as e:
+            logger.error(f"Error handling series action: {str(e)}")
+            await self._send_formatted_message(
+                query,
+                "❌ Error processing series action. Please try again."
+            )
+
+    async def _handle_continuation_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE, previous_post_text: str):
+        """Process the pasted post text to generate a continuation."""
         user_id = update.effective_user.id
-        action = query.data
+        session = self.user_sessions[user_id]
         
+        await self._send_formatted_message(update, "⏳ Analyzing your post and generating a follow-up... this might take a moment.")
+        
+        try:
+            # Generate continuation post
+            post_data = await asyncio.to_thread(
+                self.ai_generator.generate_continuation_post,
+                previous_post_text,
+                audience_type=session.get('audience_type', 'business') # Default to business
+            )
+
+            # Reset state after processing
+            session['state'] = None
+            
+            # Use existing methods to show the post and get feedback
+            session['current_draft'] = post_data
+            await self._send_new_post_message_from_update(update, post_data, session)
+
+        except Exception as e:
+            logger.error(f"Error generating continuation post: {e}", exc_info=True)
+            await self._send_formatted_message(update, f"❌ An error occurred while generating the follow-up post: {e}")
+            session['state'] = None
+
+    async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle plain text messages, checking for session states."""
+        user_id = update.effective_user.id
+        text = update.message.text
+        
+        session = self.user_sessions.get(user_id)
+        
+        if session and session.get('state') == 'awaiting_continuation_input':
+            await self._handle_continuation_post(update, context, text)
+        else:
+            # Default behavior for unexpected text
+            await self._send_formatted_message(update, "Thanks for your message! If you want to generate a post, please send me a `.md` file. "
+                "Use `/help` to see all commands.")
+
+    async def _approve_post(self, query, session):
+        """Approve and save the post to Airtable."""
+        try:
+            post_data = session['current_draft']
+            filename = session['filename']
+            
+            # Create a title from filename for display purposes only
+            display_title = filename.replace('.md', '').replace('_', ' ').title()
+            
+            # Save to Airtable
+            record_id = self.airtable.save_draft(post_data, display_title, "📝 To Review")
+            session['airtable_record_id'] = record_id
+            
+            # Add post to series using existing multi-post infrastructure
+            user_id = query.from_user.id
+            self._add_post_to_series(user_id, post_data, record_id)
+            
+            # Show success message with follow-up options
+            success_message = f"""✅ Post Approved & Saved!
+
+File: {filename}
+Status: Ready for Facebook publishing
+Airtable Record ID: {record_id}
+
+Your post is now saved in Airtable with:
+• Generated draft content
+• AI tone analysis and reasoning
+• Auto-extracted tags
+• Content summary and length metrics
+• Improvement suggestions
+
+What would you like to do next?"""
+            
+            # Create keyboard with follow-up options
+            keyboard = [
+                [
+                    InlineKeyboardButton("🔄 Generate Follow-up Post", callback_data="generate_followup"),
+                    InlineKeyboardButton("📋 View Series", callback_data="view_series")
+                ],
+                [
+                    InlineKeyboardButton("📤 Export Current Post", callback_data="export_current"),
+                    InlineKeyboardButton("✨ Done", callback_data="done_session")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(query, success_message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error saving post: {str(e)}")
+
+    async def _handle_followup_generation(self, query, session):
+        """Handle follow-up post generation request."""
+        try:
+            # Check if we have previous posts
+            posts = session.get('posts', [])
+            if not posts:
+                await self._send_formatted_message(query, "❌ No posts in series to build upon.")
+                return
+            
+            # Show relationship type selection
+            await self._show_followup_relationship_selection(query, session)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error setting up follow-up generation: {str(e)}")
+
+    async def _show_followup_relationship_selection(self, query, session):
+        """Show relationship type selection for follow-up posts."""
+        try:
+            # Get relationship types from AI generator
+            relationship_types = self.ai_generator.get_relationship_types()
+            
+            message = f"""🔄 Generate Follow-up Post
+
+You have {len(session.get('posts', []))} post(s) in your series.
+
+How should the new post relate to your previous posts?
+
+Choose a relationship type:"""
+            
+            # Create keyboard with relationship options
+            keyboard = []
+            for key, display_name in relationship_types.items():
+                keyboard.append([InlineKeyboardButton(display_name, callback_data=f"followup_rel_{key}")])
+            
+            # Add special option for AI to choose
+            keyboard.append([InlineKeyboardButton("🤖 Let AI Choose Best Relationship", callback_data="followup_rel_ai_choose")])
+            keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_followup")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(query, message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error showing relationship options: {str(e)}")
+
+    async def _handle_followup_relationship_selection(self, query, session, relationship_type):
+        """Handle relationship type selection for follow-up posts."""
+        try:
+            # Get session context
+            session_context = session.get('session_context', '')
+            previous_posts = session.get('posts', [])
+            
+            # Generate follow-up post with the selected relationship type
+            await self._send_formatted_message(query, f"🔄 Generating follow-up post with {relationship_type} relationship...\n\n"
+                "⏳ This may take a moment...")
+            
+            # Use the original markdown content with context awareness
+            markdown_content = session['original_markdown']
+            
+            # Determine parent post (use the most recent post)
+            parent_post_id = str(previous_posts[-1]['post_id']) if previous_posts else None
+            
+            # Generate the follow-up post
+            if relationship_type == 'ai_choose':
+                # Let AI choose the best relationship
+                post_data = self.ai_generator.generate_facebook_post(
+                    markdown_content,
+                    user_tone_preference=None,
+                    session_context=session_context,
+                    previous_posts=previous_posts,
+                    relationship_type=None,  # Let AI choose
+                    parent_post_id=parent_post_id,
+                    audience_type='business'
+                )
+            else:
+                # Use the selected relationship type
+                post_data = self.ai_generator.generate_facebook_post(
+                    markdown_content,
+                    user_tone_preference=None,
+                    session_context=session_context,
+                    previous_posts=previous_posts,
+                    relationship_type=relationship_type,
+                    parent_post_id=parent_post_id,
+                    audience_type='business'
+                )
+            
+            # Store the generated post
+            session['current_draft'] = post_data
+            
+            # Show the generated follow-up post
+            await self._show_generated_post(query, post_data, session)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error generating follow-up post: {str(e)}")
+
+    async def _view_series(self, query, session):
+        """Show the current series of posts."""
+        try:
+            posts = session.get('posts', [])
+            if not posts:
+                await self._send_formatted_message(query, "❌ No posts in series yet.")
+                return
+            
+            # Create series summary
+            series_message = f"""📋 Your Post Series
+
+File: {session['filename']}
+Total Posts: {len(posts)}
+
+Posts in Series:"""
+            
+            for i, post in enumerate(posts, 1):
+                series_message += f"\n\n**Post {i}:**"
+                series_message += f"\n• Tone: {post['tone_used']}"
+                series_message += f"\n• Created: {post['approved_at'][:10]}"
+                if post.get('relationship_type'):
+                    series_message += f"\n• Relationship: {post['relationship_type']}"
+                series_message += f"\n• Preview: {post['content_summary']}"
+            
+            # Add action buttons
+            keyboard = [
+                [
+                    InlineKeyboardButton("🔄 Generate Follow-up", callback_data="generate_followup"),
+                    InlineKeyboardButton("📤 Export All", callback_data="export_series")
+                ],
+                [
+                    InlineKeyboardButton("⬅️ Back", callback_data="back_to_options")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(query, series_message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error showing series: {str(e)}")
+
+    async def _done_session(self, query, session):
+        """Complete the session and show final summary."""
+        try:
+            posts = session.get('posts', [])
+            filename = session['filename']
+            
+            summary_message = f"""✅ Session Complete!
+
+File: {filename}
+Posts Generated: {len(posts)}
+
+All posts have been saved to Airtable and are ready for Facebook publishing.
+
+Next Steps:
+1. Open your Airtable Content Tracker
+2. Find your approved posts
+3. Copy the content to Facebook
+4. Update the "Post URL (After Publishing)" field in Airtable
+
+Send another markdown file to generate more posts!"""
+            
+            await self._send_formatted_message(query, summary_message)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error completing session: {str(e)}")
+
+    async def _regenerate_post(self, query, session):
+        """Regenerate the post with general feedback."""
+        try:
+            await self._send_formatted_message(query, "🔄 Regenerating your post...\n\n"
+                "⏳ Creating a new version with different approach...")
+            
+            # Regenerate with general feedback
+            markdown_content = session['original_markdown']
+            post_data = self.ai_generator.regenerate_post(
+                markdown_content,
+                feedback="User requested regeneration - try different tone or approach"
+            )
+            
+            session['current_draft'] = post_data
+            
+            # Show the regenerated post
+            await self._show_generated_post(query, post_data, session)
+            
+        except Exception as e:
+            logger.error(f"Error in _regenerate_post: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error regenerating post: {str(e)}")
+    
+    async def _regenerate_with_tone(self, query, session, tone: str):
+        """Regenerate the post with a specific tone."""
+        try:
+            await self._send_formatted_message(query, f"🎨 Regenerating with '{tone}' tone...\n\n"
+                "⏳ Creating a new version with the selected tone...")
+            
+            # Get the original markdown content
+            original_markdown = session.get('original_markdown', '')
+            
+            # Regenerate the post with specific tone
+            post_data = self.ai_generator.regenerate_post(
+                original_markdown, 
+                feedback=f"User requested {tone} tone",
+                tone_preference=tone
+            )
+            
+            # Update session with new draft
+            session['current_draft'] = post_data
+            session['last_activity'] = datetime.now()
+            
+            # Show the regenerated post
+            await self._show_generated_post(query, post_data, session)
+            
+        except Exception as e:
+            logger.error(f"Error regenerating with tone {tone}: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error regenerating post: {str(e)}")
+
+    async def _cancel_session(self, query, user_id):
+        """Cancel current session."""
+        if user_id in self.user_sessions:
+            del self.user_sessions[user_id]
+        
+        await self._send_formatted_message(query, "❌ Session cancelled.\n\n"
+            "Send a new markdown file to start over! 📄")
+
+    async def _handle_post_action(self, query, user_id: int, action: str):
+        """Handle individual post actions like delete, edit, regenerate."""
         if user_id not in self.user_sessions:
-            await query.edit_message_text("❌ Session expired. Please upload a new file.")
+            await self._send_formatted_message(query, "❌ Session expired. Please upload a new file.")
             return
         
         session = self.user_sessions[user_id]
         
-        if action == "approve":
-            await self._approve_post(query, session)
-        elif action == "regenerate":
-            await self._regenerate_post(query, session)
-        elif action == "change_tone":
-            await self._show_tone_options(query, session)
-        elif action == "cancel":
-            await self._cancel_session(query, user_id)
-        elif action == "generate_another":
-            await self._generate_another_post(query, session)
-        elif action == "new_file":
-            await self._new_file_session(query, user_id)
-        elif action == "done":
-            await self._finish_session(query, user_id)
-        elif action.startswith("tone_"):
-            # Handle tone selection
-            tone_name = action.replace("tone_", "").replace("_", " ")
-            await self._regenerate_with_tone(query, session, tone_name)
-        elif action.startswith("rel_"):
-            # Handle relationship selection
-            await self._handle_relationship_choice(query, user_id)
-        elif action.startswith("prev_post_"):
-            # Handle previous post selection
-            await self._handle_previous_post_selection(query, user_id)
-        elif action == "confirm_generation":
-            # Handle generation confirmation
-            await self._confirm_generation(query, user_id)
-        elif action == "series_post_details":
-            await self._show_series_overview(query, context)
-        elif action == "series_export":
-            await self._export_series(query, session)
-        elif action == "series_refresh":
-            await self._show_series_overview(query, context)
-        elif action == "series_close":
-            await query.edit_message_text(
-                "❌ **Series Overview Closed.**\n\n"
-                "Send a new markdown file to start a fresh content series! 📄",
-                parse_mode='Markdown'
-            )
-        elif action == "series_manage_posts":
-            await self._show_post_management(query, user_id)
-        elif action.startswith("export_"):
-            # Handle export actions
-            await self._handle_export_action(query, user_id, action)
-        elif action.startswith("post_"):
-            # Handle individual post actions
-            await self._handle_post_action(query, user_id, action)
+        try:
+            if action.startswith("post_delete_"):
+                post_id = int(action.replace("post_delete_", ""))
+                await self._delete_post(query, session, post_id)
+            elif action.startswith("post_regenerate_"):
+                post_id = int(action.replace("post_regenerate_", ""))
+                await self._regenerate_individual_post(query, session, post_id)
+            elif action.startswith("post_view_"):
+                post_id = int(action.replace("post_view_", ""))
+                await self._view_individual_post(query, session, post_id)
+            elif action == "post_confirm_delete":
+                await self._confirm_delete_post(query, session)
+            elif action == "post_cancel_delete":
+                await self._cancel_delete_post(query, session)
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error managing post: {str(e)}")
+    
+    async def _delete_post(self, query, session, post_id: int):
+        """Delete a post from the series."""
+        posts = session.get('posts', [])
+        post_to_delete = None
+        
+        for post in posts:
+            if post['post_id'] == post_id:
+                post_to_delete = post
+                break
+        
+        if not post_to_delete:
+            await self._send_formatted_message(query, "❌ Post not found.")
+            return
+        
+        # Store deletion context in session
+        session['pending_delete'] = {
+            'post_id': post_id,
+            'post_data': post_to_delete
+        }
+        
+        # Show confirmation
+        confirmation_message = f"""
+⚠️ **Confirm Post Deletion**
+
+**Post {post_id}:** {post_to_delete['tone_used']}
+**Content:** {post_to_delete.get('content_summary', 'No summary')}
+**Created:** {post_to_delete.get('approved_at', 'Unknown')}
+
+**Warning:** This action cannot be undone. The post will be removed from your series and marked as deleted in Airtable.
+
+Are you sure you want to delete this post?
+        """
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🗑️ Yes, Delete", callback_data="post_confirm_delete"),
+                InlineKeyboardButton("❌ Cancel", callback_data="post_cancel_delete")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await self._send_formatted_message(query, confirmation_message.strip(), reply_markup=reply_markup)
+    
+    async def _confirm_delete_post(self, query, session):
+        """Confirm and execute post deletion."""
+        pending_delete = session.get('pending_delete')
+        if not pending_delete:
+            await self._send_formatted_message(query, "❌ No pending deletion found.")
+            return
+        
+        post_id = pending_delete['post_id']
+        post_data = pending_delete['post_data']
+        
+        # Remove from session
+        posts = session.get('posts', [])
+        session['posts'] = [p for p in posts if p['post_id'] != post_id]
+        session['post_count'] -= 1
+        
+        # Update Airtable record to mark as deleted
+        try:
+            record_id = post_data.get('airtable_record_id')
+            if record_id:
+                self.airtable.airtable.update(record_id, {
+                    'Review Status': '🗑️ Deleted',
+                    'AI Notes or Edits': f"Post deleted from series on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                })
+        except Exception as e:
+            logger.warning(f"Failed to update Airtable record: {e}")
+        
+        # Clear pending deletion
+        del session['pending_delete']
+        
+        # Update session context
+        self._update_session_context(query.from_user.id)
+        
+        await self._send_formatted_message(query, f"✅ **Post {post_id} deleted successfully**\n\n"
+            f"The post has been removed from your series and marked as deleted in Airtable.")
+        
+        # Return to series overview after 2 seconds
+        await asyncio.sleep(2)
+        await self._show_series_overview(query, None)
+    
+    async def _cancel_delete_post(self, query, session):
+        """Cancel post deletion."""
+        if 'pending_delete' in session:
+            del session['pending_delete']
+        
+        await self._send_formatted_message(query, "❌ **Post deletion cancelled**\n\n"
+            "No changes were made to your series.")
+        
+        # Return to series overview
+        await asyncio.sleep(1)
+        await self._show_series_overview(query, None)
+    
+    async def _regenerate_individual_post(self, query, session, post_id: int):
+        """Regenerate a specific post from the series."""
+        posts = session.get('posts', [])
+        post_to_regenerate = None
+        
+        for post in posts:
+            if post['post_id'] == post_id:
+                post_to_regenerate = post
+                break
+        
+        if not post_to_regenerate:
+            await self._send_formatted_message(query, "❌ Post not found.")
+            return
+        
+        await self._send_formatted_message(query, f"🔄 **Regenerating Post {post_id}...**\n\n"
+            "⏳ Creating a new version while preserving context...")
+        
+        # Regenerate the post with same context
+        try:
+            # Get context for regeneration
+            session_context = session.get('session_context', '')
+            previous_posts = session.get('posts', [])
             
+            # Create a mock current_draft to preserve context
+            session['current_draft'] = {
+                'relationship_type': post_to_regenerate.get('relationship_type'),
+                'parent_post_id': post_to_regenerate.get('parent_post_id')
+            }
+            
+            markdown_content = session['original_markdown']
+            post_data = self.ai_generator.regenerate_post(
+                markdown_content,
+                feedback=f"User requested regeneration of Post {post_id}",
+                session_context=session_context,
+                previous_posts=previous_posts,
+                relationship_type=post_to_regenerate.get('relationship_type'),
+                parent_post_id=post_to_regenerate.get('parent_post_id')
+            )
+            
+            # Update the post in the series
+            for i, post in enumerate(posts):
+                if post['post_id'] == post_id:
+                    posts[i].update({
+                        'content': post_data.get('post_content', ''),
+                        'tone_used': post_data.get('tone_used', 'Unknown'),
+                        'content_summary': post_data.get('post_content', '')[:100] + '...' if len(post_data.get('post_content', '')) > 100 else post_data.get('post_content', ''),
+                        'approved_at': datetime.now().isoformat()
+                    })
+                    break
+            
+            # Update Airtable record
+            try:
+                record_id = post_to_regenerate.get('airtable_record_id')
+                if record_id:
+                    self.airtable.airtable.update(record_id, {
+                        'Generated Draft': post_data.get('post_content', ''),
+                        'AI Notes or Edits': f"Post regenerated on {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n{post_data.get('tone_reason', '')}"
+                    })
+            except Exception as e:
+                logger.warning(f"Failed to update Airtable record: {e}")
+            
+            # Update session context
+            self._update_session_context(query.from_user.id)
+            
+            await self._send_formatted_message(query, f"✅ Post {post_id} regenerated successfully\n\n"
+                f"New tone: {post_data.get('tone_used', 'Unknown')}\n"
+                f"Content preview: {post_data.get('post_content', '')[:100]}...\n\n"
+                f"The post has been updated in your series and Airtable.")
+            
+            # Return to series overview after 3 seconds
+            await asyncio.sleep(3)
+            await self._show_series_overview(query, None)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error regenerating post: {str(e)}")
+    
+    async def _view_individual_post(self, query, session, post_id: int):
+        """View details of an individual post."""
+        posts = session.get('posts', [])
+        post_to_view = None
+        
+        for post in posts:
+            if post['post_id'] == post_id:
+                post_to_view = post
+                break
+        
+        if not post_to_view:
+            await self._send_formatted_message(query, "❌ Post not found.")
+            return
+        
+        # Format post details
+        post_content = post_to_view.get('content', '')
+        if len(post_content) > 3000:
+            display_content = post_content[:3000] + "\n\n📝 [Content truncated for display]"
+        else:
+            display_content = post_content
+        
+        post_details = f"""📝 **Post {post_id} Details**
+
+**Tone:** {post_to_view['tone_used']}
+**Created:** {post_to_view.get('approved_at', 'Unknown')}
+**Airtable ID:** {post_to_view.get('airtable_record_id', 'Unknown')}
+
+**Relationship Info:**
+• Type: {post_to_view.get('relationship_type', 'None')}
+• Parent Post: {post_to_view.get('parent_post_id', 'None')}
+
+**Content:**
+───────────────────────────
+{display_content}
+───────────────────────────"""
+        
+        # Create action buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("🔄 Regenerate", callback_data=f"post_regenerate_{post_id}"),
+                InlineKeyboardButton("🗑️ Delete", callback_data=f"post_delete_{post_id}")
+            ],
+            [
+                InlineKeyboardButton("⬅️ Back to Series", callback_data="series_refresh")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await self._send_formatted_message(query, post_details.strip(), reply_markup=reply_markup)
+    
+    async def _show_post_management(self, query, user_id: int):
+        """Show post management interface with all posts."""
+        if user_id not in self.user_sessions:
+            await self._send_formatted_message(query, "❌ Session expired. Please upload a new file.")
+            return
+        
+        session = self.user_sessions[user_id]
+        posts = session.get('posts', [])
+        
+        if not posts:
+            await self._send_formatted_message(query, "❌ **No posts to manage**\n\n"
+                "Create some posts first before managing them.")
+            return
+        
+        # Create post management message
+        management_message = f"""
+🔧 **Post Management**
+
+Series: {session.get('filename', 'Unknown')}
+Total Posts: {len(posts)}
+
+**Select a post to manage:**
+        """
+        
+        # Create buttons for each post
+        keyboard = []
+        for post in posts:
+            post_snippet = post.get('content_summary', 'No summary')[:40] + '...'
+            tone_emoji = self._get_tone_emoji(post['tone_used'])
+            button_text = f"{tone_emoji} Post {post['post_id']}: {post_snippet}"
+            callback_data = f"post_view_{post['post_id']}"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+        
+        # Add navigation buttons
+        keyboard.append([InlineKeyboardButton("⬅️ Back to Series", callback_data="series_refresh")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await self._send_formatted_message(query, management_message.strip(), reply_markup=reply_markup)
+    
+    async def _show_initial_tone_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE, session: Dict):
+        """Show enhanced tone selection interface before generation."""
+        user_id = update.effective_user.id
+        
+        # Set session state for tone selection
+        session['workflow_state'] = 'awaiting_initial_tone_selection'
+        
+        # Analyze content to provide smart recommendations
+        markdown_content = session['original_markdown']
+        content_analysis = self._analyze_content_for_tone_recommendations(markdown_content)
+        
+        # Get all tone options
+        tone_options = self.ai_generator.get_tone_options()
+        
+        # Create message with smart recommendations
+        filename = session['filename']
+        file_display = filename.replace('.md', '').replace('_', ' ').title()
+        
+        message_parts = [
+            f"🎨 **Choose Your Tone Style**",
+            f"📄 File: {file_display}",
+            ""
+        ]
+        
+        # Add dynamic recommendations (only if we have good matches)
+        if content_analysis['recommended_tones']:
+            message_parts.extend([
+                "**Smart Recommendations:**",
+                f"• 🎯 **{content_analysis['recommended_tones'][0]}** - {content_analysis['reasons'][content_analysis['recommended_tones'][0]]}",
+                ""
+            ])
+        
+        message_parts.extend([
+            "**All Available Tones:**",
+            "Choose the style that best fits your content:"
+        ])
+        
+        # Create 2-column keyboard layout for all tone options
+        keyboard = []
+        
+        # Create tone buttons in 2 columns
+        for i in range(0, len(tone_options), 2):
+            row = []
+            
+            # First column
+            tone1 = tone_options[i]
+            is_recommended1 = tone1 in content_analysis['recommended_tones']
+            emoji1 = "🎯" if is_recommended1 else "🎨"
+            label1 = f"{emoji1} {tone1}"
+            if is_recommended1:
+                label1 += " ⭐"
+            
+            callback_data1 = self._create_tone_callback_data(tone1)
+            row.append(InlineKeyboardButton(label1, callback_data=f"initial_{callback_data1}"))
+            
+            # Second column (if available)
+            if i + 1 < len(tone_options):
+                tone2 = tone_options[i + 1]
+                is_recommended2 = tone2 in content_analysis['recommended_tones']
+                emoji2 = "🎯" if is_recommended2 else "🎨"
+                label2 = f"{emoji2} {tone2}"
+                if is_recommended2:
+                    label2 += " ⭐"
+                
+                callback_data2 = self._create_tone_callback_data(tone2)
+                row.append(InlineKeyboardButton(label2, callback_data=f"initial_{callback_data2}"))
+            
+            keyboard.append(row)
+        
+        # Add special options in a separate row
+        keyboard.extend([
+            [
+                InlineKeyboardButton("🤖 AI Choose", callback_data="initial_ai_choose"),
+                InlineKeyboardButton("📊 Previews", callback_data="show_tone_previews")
+            ],
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+        ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await self._send_formatted_message(update, "\n".join(message_parts), reply_markup=reply_markup)
+    
+    def _analyze_content_for_tone_recommendations(self, markdown_content: str) -> Dict:
+        """Analyze content to provide intelligent tone recommendations."""
+        content_lower = markdown_content.lower()
+        
+        # Content analysis patterns with scoring
+        tone_scores = {
+            'Behind-the-Build': 0,
+            'What Broke': 0,
+            'Problem → Solution → Result': 0,
+            'Finished & Proud': 0,
+            'Mini Lesson': 0
+        }
+        
+        # Behind-the-Build indicators
+        build_indicators = ['built', 'created', 'developed', 'implemented', 'constructed', 'assembled']
+        if any(word in content_lower for word in build_indicators):
+            tone_scores['Behind-the-Build'] += 3
+        if any(word in content_lower for word in ['cursor', 'ai', 'automation', 'bot', 'system']):
+            tone_scores['Behind-the-Build'] += 2
+        
+        # What Broke indicators
+        broke_indicators = ['broke', 'failed', 'error', 'bug', 'fix', 'debug', 'issue', 'problem', 'trouble']
+        if any(word in content_lower for word in broke_indicators):
+            tone_scores['What Broke'] += 3
+        if any(word in content_lower for word in ['solved', 'resolved', 'fixed', 'working']):
+            tone_scores['What Broke'] += 1
+        
+        # Problem → Solution → Result indicators
+        problem_indicators = ['problem', 'issue', 'challenge', 'solved', 'solution', 'result', 'outcome']
+        if any(word in content_lower for word in problem_indicators):
+            tone_scores['Problem → Solution → Result'] += 3
+        if any(word in content_lower for word in ['because', 'so', 'therefore', 'thus']):
+            tone_scores['Problem → Solution → Result'] += 1
+        
+        # Finished & Proud indicators
+        finished_indicators = ['completed', 'finished', 'shipped', 'deployed', 'launched', 'done', 'successful']
+        if any(word in content_lower for word in finished_indicators):
+            tone_scores['Finished & Proud'] += 3
+        if any(word in content_lower for word in ['working', 'functional', 'operational']):
+            tone_scores['Finished & Proud'] += 1
+        
+        # Mini Lesson indicators
+        lesson_indicators = ['learned', 'insight', 'principle', 'lesson', 'discovered', 'realized', 'found']
+        if any(word in content_lower for word in lesson_indicators):
+            tone_scores['Mini Lesson'] += 3
+        if any(word in content_lower for word in ['important', 'key', 'critical', 'essential']):
+            tone_scores['Mini Lesson'] += 1
+        
+        # Add some randomness to avoid always showing the same recommendations
+        for tone in tone_scores:
+            tone_scores[tone] += random.uniform(0, 1)
+        
+        # Sort tones by score and get top recommendations
+        sorted_tones = sorted(tone_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # Only recommend tones with meaningful scores (at least 2 points)
+        recommendations = [tone for tone, score in sorted_tones if score >= 2]
+        
+        # Limit to top 2-3 recommendations
+        recommendations = recommendations[:min(3, len(recommendations))]
+        
+        # If no strong recommendations, suggest the top 2 based on general content
+        if not recommendations:
+            recommendations = [sorted_tones[0][0], sorted_tones[1][0]]
+        
+        # Create reasons for recommendations
+        reasons = {
+            'Behind-the-Build': 'Content shows building/development process',
+            'What Broke': 'Content involves troubleshooting/fixing issues',
+            'Problem → Solution → Result': 'Content follows problem-solving narrative',
+            'Finished & Proud': 'Content celebrates completion/achievement',
+            'Mini Lesson': 'Content shares learning/insights'
+        }
+        
+        return {
+            'recommended_tones': recommendations,
+            'reasons': reasons,
+            'content_keywords': self._extract_content_keywords(markdown_content),
+            'tone_scores': tone_scores  # For debugging
+        }
+    
+    def _extract_content_keywords(self, content: str) -> List[str]:
+        """Extract key technical terms from content."""
+        keywords = []
+        technical_terms = [
+            'ai', 'automation', 'bot', 'api', 'database', 'machine learning',
+            'telegram', 'python', 'javascript', 'react', 'backend', 'frontend',
+            'cursor', 'openai', 'gpt', 'claude', 'airtable', 'webhook'
+        ]
+        
+        content_lower = content.lower()
+        for term in technical_terms:
+            if term in content_lower:
+                keywords.append(term)
+        
+        return keywords[:5]  # Return top 5 keywords
+    
+    def _create_tone_callback_data(self, tone: str) -> str:
+        """Create callback data for tone selection."""
+        # Create callback data from tone (consistent with existing method)
+        if ' ' in tone:
+            callback_data = f"tone_{tone.split(' ', 1)[1].replace(' ', '_').replace('→', 'to').lower()}"
+        else:
+            callback_data = f"tone_{tone.replace('→', 'to').lower()}"
+        
+        # Ensure callback_data is not too long (Telegram limit is 64 characters)
+        if len(callback_data) > 60:
+            callback_data = callback_data[:60]
+        
+        return callback_data
+    
+    async def _show_tone_previews(self, query, session):
+        """Show tone previews with examples."""
+        tone_examples = {
+            'Behind-the-Build': "I built this system to solve a specific problem I was having...",
+            'What Broke': "Something didn't work as expected with my latest automation...",
+            'Finished & Proud': "Got this working after some trial and error...",
+            'Problem → Solution → Result': "I was spending hours manually processing data...",
+            'Mini Lesson': "Building this reminded me that simple solutions often work best..."
+        }
+        
+        message_parts = [
+            "📖 **Tone Style Previews**",
+            "",
+            "Here's how each tone typically starts:"
+        ]
+        
+        for tone, example in tone_examples.items():
+            message_parts.extend([
+                f"**{tone}:**",
+                f"_{example}_",
+                ""
+            ])
+        
+        keyboard = [
+            [InlineKeyboardButton("⬅️ Back to Selection", callback_data="back_to_initial_tone_selection")]
+        ]
+        
+        await self._send_formatted_message(query, "\n".join(message_parts), reply_markup=InlineKeyboardMarkup(keyboard))
+    
     async def _handle_export_action(self, query, user_id: int, action: str):
         """Handle export actions for series data."""
         if user_id not in self.user_sessions:
-            await query.edit_message_text("❌ Session expired. Please upload a new file.")
+            await self._send_formatted_message(query, "❌ Session expired. Please upload a new file.")
             return
         
         session = self.user_sessions[user_id]
@@ -478,1008 +1693,44 @@ What would you like to do?"""
             elif action == "export_airtable":
                 await self._export_airtable_link(query, session)
         except Exception as e:
-            await query.edit_message_text(
-                f"❌ **Error exporting series:** {str(e)}",
-                parse_mode='Markdown'
-            )
+            await self._send_formatted_message(query, f"❌ **Error exporting series:** {str(e)}")
     
-    async def _approve_post(self, query, session):
-        """Approve and save the post to Airtable."""
+    def run(self):
+        """Start the bot."""
         try:
-            post_data = session['current_draft']
-            filename = session['filename']
+            # Validate configuration
+            self.config.validate_config()
             
-            # Create a title from filename for display purposes only
-            display_title = filename.replace('.md', '').replace('_', ' ').title()
+            logger.info("Starting Facebook Content Generator Bot...")
             
-            # Save to Airtable with FULL multi-post support
-            record_id = self.airtable.save_draft_with_multi_post_fields(
-                post_data=post_data,
-                title=display_title,
-                review_status="📝 To Review",
-                series_id=session['series_id'],
-                sequence_number=session['post_count'] + 1,
-                parent_post_id=None,  # TODO: Will be set when building on previous posts
-                relationship_type=None,  # TODO: Will be set when building on previous posts
-                session_context=session['session_context']
-            )
+            # Log the correct AI provider and model
+            model_info = self.ai_generator.get_model_info()
+            logger.info(f"Using {model_info['provider']} model: {model_info['model']}")
+            logger.info(f"Model description: {model_info['description']}")
             
-            # Add to series
-            self._add_post_to_series(query.from_user.id, post_data, record_id)
+            # Test Airtable connection
+            if not self.airtable.test_connection():
+                logger.warning("Airtable connection test failed - check your configuration")
             
-            # Create success message with action buttons
-            success_message = f"""✅ **Post Approved & Saved\\!**
-
-📊 **Series Info:**
-• File: {self._escape_markdown(filename)}
-• Posts in series: {session['post_count']}
-• Series ID: {session['series_id'][:8]}\\.\\.\\. 
-• Record ID: {record_id}
-
-🚀 **v2\\.0 Multi\\-Post Ready\\!**
-• Series tracking active
-• Post sequence: {session['post_count']}
-• AI context saved
-• Relationship support enabled
-
-📝 **Saved to Airtable for review & publishing**"""
-            
-            # Create inline keyboard for next actions
-            keyboard = [
-                [
-                    InlineKeyboardButton("🔄 Generate Another Post", callback_data="generate_another"),
-                    InlineKeyboardButton("📁 New File", callback_data="new_file")
-                ],
-                [
-                    InlineKeyboardButton("✅ Done", callback_data="done")
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await query.edit_message_text(
-                success_message,
-                parse_mode='MarkdownV2',
-                reply_markup=reply_markup
-            )
+            # Run the bot
+            self.application.run_polling(allowed_updates=Update.ALL_TYPES)
             
         except Exception as e:
-            # Fallback to simple message if formatting fails
-            try:
-                simple_message = f"✅ Post approved and saved to Airtable!\n\nRecord ID: {record_id}\nSeries: {session['post_count']} posts\n\nSend another .md file to continue or type 'done' to finish."
-                await query.edit_message_text(simple_message)
-            except:
-                # Final fallback
-                await query.edit_message_text("✅ Post approved and saved successfully!")
-            
-            print(f"Warning: Success message formatting error: {e}")
-    
-    async def _regenerate_post(self, query, session):
-        """Regenerate the post with general feedback and context awareness."""
-        try:
-            await query.edit_message_text(
-                "🔄 Regenerating your post...\n\n"
-                "⏳ Creating a new version with different approach..."
-            )
-            
-            # Get context for regeneration
-            session_context = session.get('session_context', '')
-            previous_posts = session.get('posts', [])
-            
-            # BUGFIX: Extract relationship context from current_draft to preserve follow-up classification
-            current_draft = session.get('current_draft', {})
-            relationship_type = current_draft.get('relationship_type')
-            parent_post_id = current_draft.get('parent_post_id')
-            
-            # Regenerate with context awareness AND relationship preservation
-            markdown_content = session['original_markdown'] 
-            post_data = self.ai_generator.regenerate_post(
-                markdown_content,
-                feedback="User requested regeneration - try different tone or approach",
-                session_context=session_context,
-                previous_posts=previous_posts,
-                relationship_type=relationship_type,  # Now preserved
-                parent_post_id=parent_post_id        # Now preserved
-            )
-            
-            session['current_draft'] = post_data
-            
-            # Create new inline keyboard
-            keyboard = [
-                [
-                    InlineKeyboardButton("✅ Approve", callback_data="approve"),
-                    InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
-                ],
-                [
-                    InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
-                    InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            # Get post content and ensure it's not too long
-            post_content = post_data.get('post_content', 'No content generated')
-            tone_reason = post_data.get('tone_reason', 'No reason provided')
-            
-            # Truncate content if needed for Telegram display
-            if len(post_content) > 2000:
-                display_content = post_content[:2000] + "\n\n📝 [Content truncated for display]"
-            else:
-                display_content = post_content
-            
-            # Truncate reasoning if needed
-            if len(tone_reason) > 500:
-                display_reason = tone_reason[:500] + "..."
-            else:
-                display_reason = tone_reason
-            
-            # Add context-aware information
-            context_info = ""
-            if post_data.get('is_context_aware', False):
-                context_info = f"\n\n🔗 Context-Aware Regeneration"
-                if previous_posts:
-                    context_info += f"\n• Building on {len(previous_posts)} previous posts"
-                # Show relationship type if it was preserved
-                if post_data.get('relationship_type'):
-                    context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
-            
-            # Format the message - PLAIN TEXT (no parse_mode)
-            post_preview = f"""🔄 Regenerated Post
+            logger.error(f"Error starting bot: {e}")
+            raise
 
-Tone: {post_data.get('tone_used', 'Unknown')}{context_info}
-
-Content:
-───────────────────────────
-{display_content}
-───────────────────────────
-
-AI Reasoning: {display_reason}
-
-What would you like to do?"""
-            
-            await query.edit_message_text(
-                self._truncate_message(post_preview),
-                reply_markup=reply_markup
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in _regenerate_post: {str(e)}")
-            await query.edit_message_text(
-                f"❌ Error regenerating post: {str(e)}"
-            )
-    
-    async def _show_tone_options(self, query, session):
-        """Show tone selection options."""
-        tone_options = self.ai_generator.get_tone_options()
-        
-        keyboard = []
-        for tone in tone_options:
-            # Create callback data from tone (make it more robust)
-            if ' ' in tone:
-                # Handle tones with spaces (e.g., "Behind-the-Build")
-                callback_data = f"tone_{tone.split(' ', 1)[1].replace(' ', '_').replace('→', 'to').lower()}"
-            else:
-                # Handle single word tones
-                callback_data = f"tone_{tone.replace('→', 'to').lower()}"
-            
-            # Ensure callback_data is not too long (Telegram limit is 64 characters)
-            if len(callback_data) > 60:
-                callback_data = callback_data[:60]
-            
-            keyboard.append([InlineKeyboardButton(tone, callback_data=callback_data)])
-        
-        # Add back button
-        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="back_to_main")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            "🎨 Choose a tone style:\n\n"
-            "Select the tone you'd like for your Facebook post:",
-            reply_markup=reply_markup
-        )
-    
-    async def _regenerate_with_tone(self, query, session, tone_name):
-        """Regenerate post with specific tone and context awareness."""
-        try:
-            await query.edit_message_text(
-                f"🎨 Regenerating with '{tone_name}' tone...\n\n"
-                "⏳ Creating a new version with your selected style..."
-            )
-            
-            # Find the full tone name
-            tone_options = self.ai_generator.get_tone_options()
-            selected_tone = None
-            for tone in tone_options:
-                if tone_name.lower() in tone.lower():
-                    selected_tone = tone
-                    break
-            
-            if not selected_tone:
-                selected_tone = tone_name
-            
-            # Get context for regeneration
-            session_context = session.get('session_context', '')
-            previous_posts = session.get('posts', [])
-            
-            # BUGFIX: Extract relationship context from current_draft to preserve follow-up classification
-            current_draft = session.get('current_draft', {})
-            relationship_type = current_draft.get('relationship_type')
-            parent_post_id = current_draft.get('parent_post_id')
-            
-            # Regenerate with specific tone and context awareness AND relationship preservation
-            markdown_content = session['original_markdown']
-            post_data = self.ai_generator.regenerate_post(
-                markdown_content,
-                feedback=f"User specifically requested {selected_tone} tone",
-                tone_preference=selected_tone,
-                session_context=session_context,
-                previous_posts=previous_posts,
-                relationship_type=relationship_type,  # Now preserved
-                parent_post_id=parent_post_id        # Now preserved
-            )
-            
-            session['current_draft'] = post_data
-            
-            # Create new inline keyboard
-            keyboard = [
-                [
-                    InlineKeyboardButton("✅ Approve", callback_data="approve"),
-                    InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
-                ],
-                [
-                    InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
-                    InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            # Get post content and ensure it's not too long
-            post_content = post_data.get('post_content', 'No content generated')
-            tone_reason = post_data.get('tone_reason', 'No reason provided')
-            
-            # Truncate content if needed for Telegram display
-            if len(post_content) > 2000:
-                display_content = post_content[:2000] + "\n\n📝 [Content truncated for display]"
-            else:
-                display_content = post_content
-            
-            # Truncate reasoning if needed
-            if len(tone_reason) > 500:
-                display_reason = tone_reason[:500] + "..."
-            else:
-                display_reason = tone_reason
-            
-            # Add context-aware information
-            context_info = ""
-            if post_data.get('is_context_aware', False):
-                context_info = f"\n\n🔗 Context-Aware Regeneration"
-                if previous_posts:
-                    context_info += f"\n• Building on {len(previous_posts)} previous posts"
-                # Show relationship type if it was preserved
-                if post_data.get('relationship_type'):
-                    context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
-            
-            # Format the message - PLAIN TEXT (no parse_mode)
-            post_preview = f"""🎨 Regenerated with {selected_tone} Tone
-
-Content:
-───────────────────────────
-{display_content}
-───────────────────────────
-
-AI Reasoning: {display_reason}{context_info}
-
-What would you like to do?"""
-            
-            await query.edit_message_text(
-                self._truncate_message(post_preview),
-                reply_markup=reply_markup
-            )
-            
-        except Exception as e:
-            await query.edit_message_text(
-                f"❌ Error regenerating with tone: {str(e)}"
-            )
-    
-    async def _cancel_session(self, query, user_id):
-        """Cancel current session."""
-        if user_id in self.user_sessions:
-            del self.user_sessions[user_id]
-        
-        await query.edit_message_text(
-            "❌ **Session cancelled.**\n\n"
-            "Send a new markdown file to start over! 📄",
-            parse_mode='Markdown'
-        )
-    
-    async def _generate_another_post(self, query, session):
-        """Generate another post from the same markdown with context awareness."""
-        try:
-            # Instead of automatically generating, show relationship selection
-            await self._show_relationship_selection(query, query.from_user.id)
-            
-        except Exception as e:
-            await query.edit_message_text(
-                f"❌ Error starting post generation: {str(e)}"
-            )
-    
-    async def _show_relationship_selection(self, query, user_id: int):
-        """Show relationship type selection interface."""
-        if user_id not in self.user_sessions:
-            await query.edit_message_text("❌ Session expired. Please upload a new file.")
-            return
-        
-        session = self.user_sessions[user_id]
-        
-        # Set workflow state
-        session['workflow_state'] = 'awaiting_relationship_selection'
-        
-        # Initialize pending generation data
-        session['pending_generation'] = {
-            'relationship_type': None,
-            'parent_post_id': None,
-            'connection_preview': None,
-            'user_confirmed': False
-        }
-        
-        # Get context information
-        posts_count = len(session.get('posts', []))
-        
-        # Create message based on whether there are previous posts
-        if posts_count == 0:
-            message = """🎯 Generate Another Post
-
-This will be your first related post in the series.
-
-Choose relationship type for your next post:"""
-        else:
-            message = f"""🎯 Generate Another Post
-
-Series: {posts_count} posts created
-Building on: {session.get('filename', 'your project')}
-
-Choose relationship type for your next post:"""
-        
-        # Create inline keyboard with relationship types
-        keyboard = [
-            [
-                InlineKeyboardButton("🔍 Different Aspects", callback_data="rel_different_aspects"),
-                InlineKeyboardButton("📐 Different Angles", callback_data="rel_different_angles")
-            ],
-            [
-                InlineKeyboardButton("📚 Series Continuation", callback_data="rel_series_continuation"),
-                InlineKeyboardButton("🔗 Thematic Connection", callback_data="rel_thematic_connection")
-            ],
-            [
-                InlineKeyboardButton("🔧 Technical Deep Dive", callback_data="rel_technical_deep_dive"),
-                InlineKeyboardButton("📖 Sequential Story", callback_data="rel_sequential_story")
-            ],
-            [
-                InlineKeyboardButton("🤖 AI Decide", callback_data="rel_ai_decide")
-            ]
-        ]
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            message,
-            reply_markup=reply_markup
-        )
-    
-    async def _handle_relationship_choice(self, query, user_id: int):
-        """Handle relationship type selection."""
-        if user_id not in self.user_sessions:
-            await query.edit_message_text("❌ Session expired. Please upload a new file.")
-            return
-        
-        session = self.user_sessions[user_id]
-        
-        # Map callback data to relationship type
-        relationship_map = {
-            'rel_different_aspects': 'Different Aspects',
-            'rel_different_angles': 'Different Angles', 
-            'rel_series_continuation': 'Series Continuation',
-            'rel_thematic_connection': 'Thematic Connection',
-            'rel_technical_deep_dive': 'Technical Deep Dive',
-            'rel_sequential_story': 'Sequential Story',
-            'rel_ai_decide': 'AI Decide'
-        }
-        
-        relationship_type = relationship_map.get(query.data, 'Unknown')
-        
-        # Store the relationship type in pending generation
-        session['pending_generation']['relationship_type'] = relationship_type
-        session['workflow_state'] = 'awaiting_previous_post_selection'
-        
-        # Show previous post selection
-        await self._show_previous_post_selection(query, user_id)
-    
-    async def _show_previous_post_selection(self, query, user_id: int):
-        """Show previous post selection interface."""
-        if user_id not in self.user_sessions:
-            await query.edit_message_text("❌ Session expired. Please upload a new file.")
-            return
-        
-        session = self.user_sessions[user_id]
-        posts = session.get('posts', [])
-        relationship_type = session['pending_generation']['relationship_type']
-        
-        if not posts:
-            # No previous posts, go directly to generation
-            await self._confirm_generation(query, user_id)
-            return
-        
-        message = f"""🎯 Choose Previous Post to Build On
-
-Selected Relationship: {relationship_type}
-
-Choose which post to build upon:"""
-        
-        # Create buttons for each previous post
-        keyboard = []
-        for post in posts:
-            post_snippet = post.get('content_summary', post.get('content', ''))[:50] + '...'
-            button_text = f"Post {post['post_id']}: {post_snippet}"
-            callback_data = f"prev_post_{post['post_id']}"
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
-        
-        # Add default option
-        keyboard.append([InlineKeyboardButton("📝 Build on most recent", callback_data="prev_post_recent")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            message,
-            reply_markup=reply_markup
-        )
-
-    async def _handle_previous_post_selection(self, query, user_id: int):
-        """Handle selection of a previous post to build on."""
-        if user_id not in self.user_sessions:
-            await query.edit_message_text("❌ Session expired. Please upload a new file.")
-            return
-        
-        session = self.user_sessions[user_id]
-        posts = session.get('posts', [])
-        
-        # Get the selected post ID from the callback data
-        selected_post_id_str = query.data.replace("prev_post_", "")
-        
-        if selected_post_id_str == "recent":
-            # Handle "most recent" option
-            selected_post = posts[-1] if posts else None
-            parent_post_id = selected_post['post_id'] if selected_post else None
-        else:
-            # Handle specific post ID
-            try:
-                selected_post_id = int(selected_post_id_str)
-                selected_post = None
-                for post in posts:
-                    if post['post_id'] == selected_post_id:
-                        selected_post = post
-                        break
-                parent_post_id = selected_post_id if selected_post else None
-            except ValueError:
-                await query.edit_message_text("❌ Invalid post selection. Please try again.")
-                return
-        
-        if not selected_post:
-            await query.edit_message_text("❌ Could not find the selected post. Please try again.")
-            return
-        
-        # Store the selected post ID
-        session['pending_generation']['parent_post_id'] = parent_post_id
-        session['workflow_state'] = 'awaiting_generation_confirmation'
-        
-        # Show generation confirmation instead of immediately generating
-        await self._show_generation_confirmation(query, user_id, selected_post)
-        
-    async def _show_generation_confirmation(self, query, user_id: int, selected_post: Dict):
-        """Show generation confirmation with connection preview."""
-        if user_id not in self.user_sessions:
-            await query.edit_message_text("❌ Session expired. Please upload a new file.")
-            return
-        
-        session = self.user_sessions[user_id]
-        relationship_type = session['pending_generation']['relationship_type']
-        posts = session.get('posts', [])
-        
-        # Generate enhanced connection preview
-        connection_preview = self._generate_connection_preview(selected_post, relationship_type, posts)
-        connection_strength = self._calculate_connection_strength(relationship_type, selected_post, posts)
-        relationship_emoji = self._get_relationship_emoji(relationship_type)
-        reading_sequence = self._estimate_reading_sequence(posts, selected_post['post_id'])
-        
-        # Store the connection preview in session
-        session['pending_generation']['connection_preview'] = connection_preview
-        
-        # Get strength indicator emoji
-        strength_emoji = {
-            'Strong': '🟢',
-            'Medium': '🟡',
-            'Weak': '🔴'
-        }.get(connection_strength, '🔗')
-        
-        message = f"""🎯 Ready to Generate Post
-
-{relationship_emoji} Relationship: {relationship_type}
-📊 Connection Strength: {strength_emoji} {connection_strength}
-🔗 Building on: Post {selected_post['post_id']} ({selected_post['tone_used']} tone)
-
-Previous post preview: {selected_post['content_summary'][:80]}...
-
-Connection Preview:
-{connection_preview}
-
-Reading Sequence: {reading_sequence}
-
-Ready to generate your new post?"""
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Generate Post", callback_data="confirm_generation"),
-                InlineKeyboardButton("⬅️ Back", callback_data="back_to_relationship_selection")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            message,
-            reply_markup=reply_markup
-        )
-    
-    def _generate_connection_preview(self, selected_post: Dict, relationship_type: str, all_posts: List[Dict]) -> str:
-        """Generate an intelligent connection preview based on relationship type and context."""
-        post_id = selected_post['post_id']
-        post_tone = selected_post['tone_used']
-        post_summary = selected_post['content_summary'][:100]
-        
-        # Base connection text
-        base_text = f"This post will build on Post {post_id} ({post_tone} tone)"
-        
-        # Relationship-specific preview text
-        relationship_descriptions = {
-            'Different Aspects': f"{base_text} using a Different Aspects approach by exploring different aspects of the same topic. While the previous post covered {post_summary.lower()}, this new post will examine other facets and perspectives.",
-            
-            'Different Angles': f"{base_text} using a Different Angles approach by taking a different angle on the same subject. This will provide an alternative viewpoint to complement the {post_tone.lower()} perspective.",
-            
-            'Series Continuation': f"{base_text} as a Series Continuation, serving as the next part in a sequential series. This continues the narrative flow from the previous post.",
-            
-            'Thematic Connection': f"{base_text} through a Thematic Connection, linking posts through shared themes and principles. The posts will be connected by underlying concepts rather than direct narrative flow.",
-            
-            'Technical Deep Dive': f"{base_text} with a Technical Deep Dive approach by providing detailed technical insights. This will dive deeper into the technical aspects mentioned in the previous post.",
-            
-            'Sequential Story': f"{base_text} as a Sequential Story by continuing the story chronologically. This shows what happened next in the timeline.",
-            
-            'AI Decide': f"{base_text} using an AI Decide approach with AI-determined optimal relationship type based on content analysis."
-        }
-        
-        return relationship_descriptions.get(relationship_type, base_text)
-    
-    def _calculate_connection_strength(self, relationship_type: str, selected_post: Dict, all_posts: List[Dict]) -> str:
-        """Calculate connection strength based on relationship type and post context."""
-        # Strong connections - direct narrative flow
-        strong_relationships = ['Sequential Story', 'Series Continuation', 'Technical Deep Dive']
-        
-        # Medium connections - related but not sequential
-        medium_relationships = ['Different Aspects', 'Different Angles']
-        
-        # Weak connections - thematic only
-        weak_relationships = ['Thematic Connection', 'AI Decide']
-        
-        if relationship_type in strong_relationships:
-            return 'Strong'
-        elif relationship_type in medium_relationships:
-            return 'Medium'
-        else:
-            return 'Weak'
-    
-    def _get_relationship_emoji(self, relationship_type: str) -> str:
-        """Get emoji representation for relationship types."""
-        emoji_map = {
-            'Different Aspects': '🔍',
-            'Different Angles': '📐',
-            'Series Continuation': '📚',
-            'Thematic Connection': '🔗',
-            'Technical Deep Dive': '🔧',
-            'Sequential Story': '📖',
-            'AI Decide': '🤖'
-        }
-        return emoji_map.get(relationship_type, '📝')
-    
-    def _estimate_reading_sequence(self, all_posts: List[Dict], building_on_post_id: int) -> str:
-        """Estimate the optimal reading sequence for the post series."""
-        if not all_posts:
-            return "Post 1 → New Post"
-        
-        # Find the post we're building on
-        building_post = None
-        for post in all_posts:
-            if post['post_id'] == building_on_post_id:
-                building_post = post
-                break
-        
-        if not building_post:
-            return f"Post {building_on_post_id} → New Post"
-        
-        # Build sequence up to the building post
-        sequence_parts = []
-        current_post_id = building_on_post_id
-        
-        # Trace back to find the chain
-        post_chain = [building_post]
-        current_parent = building_post.get('parent_post_id')
-        
-        while current_parent:
-            parent_post = None
-            for post in all_posts:
-                if post['post_id'] == current_parent:
-                    parent_post = post
-                    break
-            if parent_post:
-                post_chain.insert(0, parent_post)
-                current_parent = parent_post.get('parent_post_id')
-            else:
-                break
-        
-        # Build the sequence string
-        sequence_parts = [f"Post {post['post_id']}" for post in post_chain]
-        sequence_parts.append("New Post")
-        
-        return " → ".join(sequence_parts)
-    
-    async def _confirm_generation(self, query, user_id: int):
-        """Confirm the generation process."""
-        if user_id not in self.user_sessions:
-            await query.edit_message_text("❌ Session expired. Please upload a new file.")
-            return
-        
-        session = self.user_sessions[user_id]
-        
-        # Get pending generation data
-        relationship_type = session['pending_generation']['relationship_type']
-        parent_post_id = session['pending_generation']['parent_post_id']
-        
-        # Clear pending generation state
-        session['pending_generation'] = {
-            'relationship_type': None,
-            'parent_post_id': None,
-            'connection_preview': None,
-            'user_confirmed': False
-        }
-        session['workflow_state'] = 'awaiting_tone_selection' # Reset workflow
-        
-        # Generate the post with context awareness
-        markdown_content = session['original_markdown']
-        post_data = self.ai_generator.generate_facebook_post(
-            markdown_content,
-            user_tone_preference=None,  # Let AI decide based on context
-            session_context=session['session_context'],
-            previous_posts=session['posts'],
-            relationship_type=relationship_type,
-            parent_post_id=parent_post_id
-        )
-        
-        session['current_draft'] = post_data
-        
-        # Create inline keyboard for user actions
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Approve", callback_data="approve"),
-                InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
-            ],
-            [
-                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Get post content and ensure it's not too long
-        post_content = post_data.get('post_content', 'No content generated')
-        tone_reason = post_data.get('tone_reason', 'No reason provided')
-        
-        # Truncate content if needed for Telegram display
-        if len(post_content) > 2000:
-            display_content = post_content[:2000] + "\n\n📝 [Content truncated for display]"
-        else:
-            display_content = post_content
-        
-        # Truncate reasoning if needed
-        if len(tone_reason) > 500:
-            display_reason = tone_reason[:500] + "..."
-        else:
-            display_reason = tone_reason
-        
-        # Add context-aware information
-        context_info = ""
-        if post_data.get('is_context_aware', False):
-            context_info = f"\n\n🔗 Context-Aware Generation"
-            if post_data.get('relationship_type'):
-                context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
-            if session.get('posts'):
-                context_info += f"\n• Building on {len(session.get('posts', []))} previous posts"
-        
-        # Create the message - PLAIN TEXT
-        post_preview = f"""🎯 **New Post Generated (#{session['post_count'] + 1})**
-
-**Tone:** {post_data.get('tone_used', 'Unknown')}{context_info}
-
-**Content:**
-───────────────────────────
-{display_content}
-───────────────────────────
-
-**AI Reasoning:** {display_reason}
-
-What would you like to do?"""
-        
-        await query.edit_message_text(
-            self._truncate_message(post_preview),
-            reply_markup=reply_markup
-        )
-    
-    async def _send_new_post_message(self, query, post_data: Dict, session: Dict):
-        """Send a new message with the generated post (preserves previous messages)."""
-        # Create inline keyboard for the new post
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Approve", callback_data="approve"),
-                InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
-            ],
-            [
-                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Get and format post content
-        post_content = post_data.get('post_content', 'No content generated')
-        tone_reason = post_data.get('tone_reason', 'No reason provided')
-        
-        # Truncate content if needed for Telegram display
-        if len(post_content) > 2000:
-            display_content = post_content[:2000] + "\n\n📝 [Content truncated for display]"
-        else:
-            display_content = post_content
-        
-        if len(tone_reason) > 500:
-            display_reason = tone_reason[:500] + "..."
-        else:
-            display_reason = tone_reason
-        
-        # Add context-aware information
-        context_info = ""
-        if post_data.get('is_context_aware', False):
-            context_info = f"\n\n🔗 Context-Aware Generation"
-            if post_data.get('relationship_type'):
-                context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
-            if session.get('posts'):
-                context_info += f"\n• Building on {len(session.get('posts', []))} previous posts"
-        
-        # Create the message - PLAIN TEXT
-        post_preview = f"""🔄 **New Post Generated (#{session['post_count'] + 1})**
-
-**Tone:** {post_data.get('tone_used', 'Unknown')}{context_info}
-
-**Content:**
-───────────────────────────
-{display_content}
-───────────────────────────
-
-**AI Reasoning:** {display_reason}
-
-What would you like to do?"""
-        
-        await query.message.reply_text(
-            self._truncate_message(post_preview),
-            reply_markup=reply_markup
-        )
-    
-    async def _new_file_session(self, query, user_id):
-        """Clear session and wait for new file."""
-        if user_id in self.user_sessions:
-            del self.user_sessions[user_id]
-        
-        await query.edit_message_text(
-            "📁 **Ready for new file!**\n\n"
-            "Send me a new `.md` file to start a fresh content series! 📄",
-            parse_mode='Markdown'
-        )
-    
-    async def _finish_session(self, query, user_id):
-        """Finish the session."""
-        session_info = ""
-        if user_id in self.user_sessions:
-            session = self.user_sessions[user_id]
-            session_info = f"\n\n**Session Summary:**\n• {session['post_count']} posts created\n• Series ID: {session['series_id'][:8]}..."
-            del self.user_sessions[user_id]
-        
-        await query.edit_message_text(
-            f"✅ **Session Complete!**{session_info}\n\n"
-            "All posts have been saved to Airtable. 📝\n\n"
-            "Send a new markdown file when you're ready to create more content! 🚀",
-            parse_mode='Markdown'
-        )
-    
-    async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle plain text messages, checking for session states."""
+    async def _continue_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /continue command for content continuation."""
         user_id = update.effective_user.id
-        text = update.message.text
         
-        session = self.user_sessions.get(user_id)
-        
-        if session and session.get('state') == 'awaiting_continuation_input':
-            await self._handle_continuation_post(update, context, text)
-        else:
-            # Default behavior for unexpected text
-            await update.message.reply_text(
-                "Thanks for your message! If you want to generate a post, please send me a `.md` file. "
-                "Use `/help` to see all commands."
-            )
+        # Ensure a session exists or create a placeholder
+        if user_id not in self.user_sessions:
+            self.user_sessions[user_id] = {'state': None}
 
-    async def _handle_continuation_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE, previous_post_text: str):
-        """Process the pasted post text to generate a continuation."""
-        user_id = update.effective_user.id
-        session = self.user_sessions[user_id]
+        self.user_sessions[user_id]['state'] = 'awaiting_continuation_input'
         
-        await update.message.reply_text(
-            "⏳ Analyzing your post and generating a follow-up... this might take a moment."
-        )
-        
-        try:
-            # This will be implemented in the next step
-            # For now, it's a placeholder
-            post_data = await asyncio.to_thread(
-                self.ai_generator.generate_continuation_post,
-                previous_post_text,
-                audience_type=session.get('audience_type', 'business') # Default to business
-            )
-
-            # Reset state after processing
-            session['state'] = None
-            
-            # Use existing methods to show the post and get feedback
-            # We need to adapt the session object slightly for this
-            session['current_draft'] = post_data
-            await self._send_new_post_message_from_update(update, post_data, session)
-
-        except Exception as e:
-            logger.error(f"Error generating continuation post: {e}", exc_info=True)
-            await update.message.reply_text(
-                f"❌ An error occurred while generating the follow-up post: {e}"
-            )
-            session['state'] = None
-
-    async def _send_new_post_message_from_update(self, update: Update, post_data: Dict, session: Dict):
-        """Helper to send a new post message from an Update object."""
-        # Create inline keyboard for the new post
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Approve", callback_data="approve"),
-                InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
-            ],
-            [
-                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Get and format post content
-        post_content = post_data.get('post_content', 'No content generated')
-        tone_reason = post_data.get('tone_reason', 'No reason provided')
-        
-        # Truncate content if needed for Telegram display
-        if len(post_content) > 2000:
-            display_content = post_content[:2000] + "\n\n📝 [Content truncated for display]"
-        else:
-            display_content = post_content
-        
-        if len(tone_reason) > 500:
-            display_reason = tone_reason[:500] + "..."
-        else:
-            display_reason = tone_reason
-        
-        # Add context-aware information
-        context_info = ""
-        if post_data.get('is_context_aware', False):
-            context_info = f"\n\n🔗 Context-Aware Generation"
-            if post_data.get('relationship_type'):
-                context_info += f"\n• Relationship: {post_data.get('relationship_type')}"
-            if session.get('posts'):
-                context_info += f"\n• Building on {len(session.get('posts', []))} previous posts"
-        
-        # Create the message - PLAIN TEXT
-        post_preview = f"""🔄 **New Post Generated (#{session['post_count'] + 1})**
-
-**Tone:** {post_data.get('tone_used', 'Unknown')}{context_info}
-
-**Content:**
-───────────────────────────
-{display_content}
-───────────────────────────
-
-**AI Reasoning:** {display_reason}
-
-What would you like to do?"""
-        
-        await update.message.reply_text(
-            self._truncate_message(post_preview),
-            reply_markup=reply_markup
-        )
-    
-    async def _show_generated_post(self, update: Update, post_data: Dict, session: Dict):
-        """Show a generated post with action buttons."""
-        # Create inline keyboard for the new post
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Approve", callback_data="approve"),
-                InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
-            ],
-            [
-                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Get and format post content
-        post_content = post_data.get('post_content', 'No content generated')
-        tone_reason = post_data.get('tone_reason', 'No reason provided')
-        
-        # Truncate content if needed for Telegram display
-        if len(post_content) > 2000:
-            display_content = post_content[:2000] + "\n\n📝 [Content truncated for display]"
-        else:
-            display_content = post_content
-        
-        if len(tone_reason) > 500:
-            display_reason = tone_reason[:500] + "..."
-        else:
-            display_reason = tone_reason
-        
-        # Create the message - PLAIN TEXT
-        post_preview = f"""🔄 **New Post Generated (#{session['post_count'] + 1})**
-
-**Tone:** {post_data.get('tone_used', 'Unknown')}
-
-**Content:**
-───────────────────────────
-{display_content}
-───────────────────────────
-
-**AI Reasoning:** {display_reason}
-
-What would you like to do?"""
-        
-        await update.message.reply_text(
-            self._truncate_message(post_preview),
-            reply_markup=reply_markup
-        )
-    
-    def _escape_markdown(self, text: str) -> str:
-        """Escape markdown characters for Telegram (idempotent version)."""
-        if not text:
-            return text
-        
-        # Characters that need escaping for Telegram MarkdownV2
-        escape_chars_v2 = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-        
-        # Check if text is already escaped by looking for escaped characters
-        # If we find any escaped characters, assume the text is already escaped
-        for char in escape_chars_v2:
-            if f'\\{char}' in text:
-                # Text appears to be already escaped, return as-is
-                return text
-        
-        # Text is not escaped, apply escaping
-        escaped_text = text
-        for char in escape_chars_v2:
-            escaped_text = escaped_text.replace(char, f'\\{char}')
-        
-        return escaped_text
+        await self._send_formatted_message(update, "📝 Content Continuation\n\n"
+            "Please paste the full text of the Facebook post you want to continue. I'll analyze it and generate a natural follow-up for you.")
     
     def _truncate_message(self, message: str, max_length: int = 4000) -> str:
         """Truncate message if it's too long for Telegram."""
@@ -1499,11 +1750,8 @@ What would you like to do?"""
         
         # Check if user has an active session
         if user_id not in self.user_sessions:
-            await update.message.reply_text(
-                "❌ **No active series found.**\n\n"
-                "Upload a markdown file to start a new series! 📄",
-                parse_mode='Markdown'
-            )
+            await self._send_formatted_message(update, "❌ **No active series found.**\n\n"
+                "Upload a markdown file to start a new series! 📄")
             return
         
         # Show series overview
@@ -1557,18 +1805,10 @@ What would you like to do?"""
         # Send the overview
         if query:
             # This is a callback query, edit the message
-            await query.edit_message_text(
-                self._truncate_message(overview_message.strip()),
-                parse_mode='Markdown',
-                reply_markup=keyboard
-            )
+            await self._send_formatted_message(query, self._truncate_message(overview_message.strip()), reply_markup=keyboard)
         else:
             # This is a command, send new message
-            await update_or_query.message.reply_text(
-                self._truncate_message(overview_message.strip()),
-                parse_mode='Markdown',
-                reply_markup=keyboard
-            )
+            await self._send_formatted_message(update_or_query, self._truncate_message(overview_message.strip()), reply_markup=keyboard)
     
     def _build_relationship_tree(self, posts: List[Dict]) -> Dict:
         """Build relationship tree structure from posts."""
@@ -1846,17 +2086,10 @@ Choose export format:
             from telegram import InlineKeyboardMarkup
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            await query.edit_message_text(
-                export_message.strip(),
-                parse_mode='Markdown',
-                reply_markup=reply_markup
-            )
+            await self._send_formatted_message(query, export_message.strip(), reply_markup=reply_markup)
             
         except Exception as e:
-            await query.edit_message_text(
-                f"❌ **Error showing export options:** {str(e)}",
-                parse_mode='Markdown'
-            )
+            await self._send_formatted_message(query, f"❌ **Error showing export options:** {str(e)}")
     
     async def _export_markdown(self, query, session):
         """Export series as markdown document."""
@@ -1891,11 +2124,7 @@ Choose export format:
         file_buffer = BytesIO(markdown_content.encode('utf-8'))
         file_buffer.name = f"series_{series_id}.md"
         
-        await query.message.reply_document(
-            document=file_buffer,
-            caption="📄 **Series exported as Markdown**\n\nComplete series with all posts and metadata.",
-            parse_mode='Markdown'
-        )
+        await self._send_formatted_message(query, "📄 **Series exported as Markdown**\n\nComplete series with all posts and metadata.", document=file_buffer)
         
         # Return to series overview
         await self._show_series_overview(query, None)
@@ -1934,11 +2163,7 @@ Choose export format:
         file_buffer = BytesIO(summary_content.encode('utf-8'))
         file_buffer.name = f"series_summary_{series_id}.txt"
         
-        await query.message.reply_document(
-            document=file_buffer,
-            caption="📝 **Series exported as Summary**\n\nQuick overview of all posts and statistics.",
-            parse_mode='Markdown'
-        )
+        await self._send_formatted_message(query, "📝 **Series exported as Summary**\n\nQuick overview of all posts and statistics.", document=file_buffer)
         
         # Return to series overview
         await self._show_series_overview(query, None)
@@ -1971,371 +2196,1180 @@ https://airtable.com/{self.config.airtable_base_id}
 Use filter: `Post Series ID = {series_id}`
         """
         
-        await query.edit_message_text(
-            airtable_message.strip(),
-            parse_mode='Markdown'
-        )
+        await self._send_formatted_message(query, airtable_message.strip())
         
         # Add back button
         keyboard = [[InlineKeyboardButton("⬅️ Back to Series", callback_data="series_refresh")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.edit_message_reply_markup(reply_markup=reply_markup)
-    
-    def run(self):
-        """Start the bot."""
-        try:
-            # Validate configuration
-            self.config.validate_config()
-            
-            logger.info("Starting Facebook Content Generator Bot...")
-            
-            # Log the correct AI provider and model
-            model_info = self.ai_generator.get_model_info()
-            logger.info(f"Using {model_info['provider']} model: {model_info['model']}")
-            logger.info(f"Model description: {model_info['description']}")
-            
-            # Test Airtable connection
-            if not self.airtable.test_connection():
-                logger.warning("Airtable connection test failed - check your configuration")
-            
-            # Run the bot
-            self.application.run_polling(allowed_updates=Update.ALL_TYPES)
-            
-        except Exception as e:
-            logger.error(f"Error starting bot: {e}")
-            raise
+        await self._send_formatted_message(query, "", reply_markup=reply_markup)
 
-    async def _continue_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /continue command for content continuation."""
+    async def _batch_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /batch command to start multi-file upload mode."""
         user_id = update.effective_user.id
         
-        # Ensure a session exists or create a placeholder
-        if user_id not in self.user_sessions:
-            self.user_sessions[user_id] = {'state': None}
-
-        self.user_sessions[user_id]['state'] = 'awaiting_continuation_input'
+        # Initialize or reset batch session
+        if user_id in self.user_sessions:
+            del self.user_sessions[user_id]
         
-        await update.message.reply_text(
-            "📝 Content Continuation\n\n"
-            "Please paste the full text of the Facebook post you want to continue. I'll analyze it and generate a natural follow-up for you."
-        )
-    
-    async def _handle_post_action(self, query, user_id: int, action: str):
-        """Handle individual post actions like delete, edit, regenerate."""
-        if user_id not in self.user_sessions:
-            await query.edit_message_text("❌ Session expired. Please upload a new file.")
-            return
-        
-        session = self.user_sessions[user_id]
-        
-        try:
-            if action.startswith("post_delete_"):
-                post_id = int(action.replace("post_delete_", ""))
-                await self._delete_post(query, session, post_id)
-            elif action.startswith("post_regenerate_"):
-                post_id = int(action.replace("post_regenerate_", ""))
-                await self._regenerate_individual_post(query, session, post_id)
-            elif action.startswith("post_view_"):
-                post_id = int(action.replace("post_view_", ""))
-                await self._view_individual_post(query, session, post_id)
-            elif action == "post_confirm_delete":
-                await self._confirm_delete_post(query, session)
-            elif action == "post_cancel_delete":
-                await self._cancel_delete_post(query, session)
-        except Exception as e:
-            await query.edit_message_text(
-                f"❌ **Error managing post:** {str(e)}",
-                parse_mode='Markdown'
-            )
-    
-    async def _delete_post(self, query, session, post_id: int):
-        """Delete a post from the series."""
-        posts = session.get('posts', [])
-        post_to_delete = None
-        
-        for post in posts:
-            if post['post_id'] == post_id:
-                post_to_delete = post
-                break
-        
-        if not post_to_delete:
-            await query.edit_message_text("❌ Post not found.")
-            return
-        
-        # Store deletion context in session
-        session['pending_delete'] = {
-            'post_id': post_id,
-            'post_data': post_to_delete
+        # Create new batch session
+        self.user_sessions[user_id] = {
+            'mode': 'multi',
+            'files': [],
+            'session_started': datetime.now().isoformat(),
+            'last_activity': datetime.now().isoformat(),
+            'state': 'collecting_files'
         }
         
-        # Show confirmation
-        confirmation_message = f"""
-⚠️ **Confirm Post Deletion**
-
-**Post {post_id}:** {post_to_delete['tone_used']}
-**Content:** {post_to_delete.get('content_summary', 'No summary')}
-**Created:** {post_to_delete.get('approved_at', 'Unknown')}
-
-**Warning:** This action cannot be undone. The post will be removed from your series and marked as deleted in Airtable.
-
-Are you sure you want to delete this post?
-        """
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("🗑️ Yes, Delete", callback_data="post_confirm_delete"),
-                InlineKeyboardButton("❌ Cancel", callback_data="post_cancel_delete")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            confirmation_message.strip(),
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
-    
-    async def _confirm_delete_post(self, query, session):
-        """Confirm and execute post deletion."""
-        pending_delete = session.get('pending_delete')
-        if not pending_delete:
-            await query.edit_message_text("❌ No pending deletion found.")
-            return
-        
-        post_id = pending_delete['post_id']
-        post_data = pending_delete['post_data']
-        
-        # Remove from session
-        posts = session.get('posts', [])
-        session['posts'] = [p for p in posts if p['post_id'] != post_id]
-        session['post_count'] -= 1
-        
-        # Update Airtable record to mark as deleted
         try:
-            record_id = post_data.get('airtable_record_id')
-            if record_id:
-                self.airtable.airtable.update(record_id, {
-                    'Review Status': '🗑️ Deleted',
-                    'AI Notes or Edits': f"Post deleted from series on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                })
-        except Exception as e:
-            logger.warning(f"Failed to update Airtable record: {e}")
-        
-        # Clear pending deletion
-        del session['pending_delete']
-        
-        # Update session context
-        self._update_session_context(query.from_user.id)
-        
-        await query.edit_message_text(
-            f"✅ **Post {post_id} deleted successfully**\n\n"
-            f"The post has been removed from your series and marked as deleted in Airtable.",
-            parse_mode='Markdown'
-        )
-        
-        # Return to series overview after 2 seconds
-        await asyncio.sleep(2)
-        await self._show_series_overview(query, None)
-    
-    async def _cancel_delete_post(self, query, session):
-        """Cancel post deletion."""
-        if 'pending_delete' in session:
-            del session['pending_delete']
-        
-        await query.edit_message_text(
-            "❌ **Post deletion cancelled**\n\n"
-            "No changes were made to your series.",
-            parse_mode='Markdown'
-        )
-        
-        # Return to series overview
-        await asyncio.sleep(1)
-        await self._show_series_overview(query, None)
-    
-    async def _regenerate_individual_post(self, query, session, post_id: int):
-        """Regenerate a specific post from the series."""
-        posts = session.get('posts', [])
-        post_to_regenerate = None
-        
-        for post in posts:
-            if post['post_id'] == post_id:
-                post_to_regenerate = post
-                break
-        
-        if not post_to_regenerate:
-            await query.edit_message_text("❌ Post not found.")
-            return
-        
-        await query.edit_message_text(
-            f"🔄 **Regenerating Post {post_id}...**\n\n"
-            "⏳ Creating a new version while preserving context...",
-            parse_mode='Markdown'
-        )
-        
-        # Regenerate the post with same context
-        try:
-            # Get context for regeneration
-            session_context = session.get('session_context', '')
-            previous_posts = session.get('posts', [])
+            # Send a simple initial message
+            await self._send_formatted_message(update, "📚 Multi-File Mode Started\n\nPlease send your markdown files (max 8).")
             
-            # Create a mock current_draft to preserve context
-            session['current_draft'] = {
-                'relationship_type': post_to_regenerate.get('relationship_type'),
-                'parent_post_id': post_to_regenerate.get('parent_post_id')
+            # Then send the detailed instructions
+            await self._send_formatted_message(update, "Available commands:\n"
+                "/project - View project analysis\n"
+                "/strategy - Get content strategy\n"
+                "/done - Finish uploading\n"
+                "/cancel - Exit batch mode")
+            
+        except Exception as e:
+            logger.error(f"Error in batch command: {str(e)}")
+            # Try one more time with minimal message
+            try:
+                await self._send_formatted_message(update, "Multi-File Mode Started. Send your files.")
+            except Exception as e:
+                logger.error(f"Error sending minimal message: {str(e)}")
+
+    async def _project_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /project command with background processing."""
+        user_id = update.effective_user.id
+        
+        session = self.user_sessions.get(user_id, {})
+        if not session or session.get('mode') != 'multi':
+            await self._send_formatted_message(update, "❌ No active batch session. Use /batch to start multi-file mode.")
+            return
+        
+        files = session.get('files', [])
+        if not files:
+            await self._send_formatted_message(update, "❌ No files uploaded yet. Upload some markdown files first.")
+            return
+        
+        # Send analyzing message
+        analyzing_msg = await self._send_formatted_message(update, "🔍 **Analyzing Project Files...**\n\n"
+            "⏳ Generating comprehensive project overview...")
+        
+        try:
+            # Run analysis in background
+            analysis = await self._analyze_project_files(files)
+            
+            # Format analysis message
+            analysis_message = f"""
+📊 **Project Analysis**
+
+*Theme:* {analysis['theme']}
+
+*Narrative Arc:*
+{analysis['narrative_arc']}
+
+*Key Challenges:*
+{self._format_bullet_points(analysis['key_challenges'])}
+
+*Solutions:*
+{self._format_bullet_points(analysis['solutions'])}
+
+*Technical Stack:*
+{self._format_bullet_points(analysis['technical_stack'])}
+
+*Business Outcomes:*
+{self._format_bullet_points(analysis['business_outcomes'])}
+
+Use /strategy to generate a content strategy based on this analysis.
+"""
+            
+            await self._send_formatted_message(analyzing_msg, analysis_message.strip())
+            
+        except Exception as e:
+            logger.error(f"Error analyzing project: {str(e)}")
+            await self._send_formatted_message(analyzing_msg, f"❌ **Error analyzing project:** {str(e)}")
+    
+    def _extract_project_theme(self, files: List[Dict]) -> str:
+        """Extract overall project theme from files."""
+        # Combine all file contents
+        combined_content = "\n".join(f['content'] for f in files)
+        # TODO: Implement actual theme extraction logic
+        return "AI/Automation Development"
+    
+    def _analyze_narrative_arc(self, files: List[Dict]) -> str:
+        """Analyze the narrative progression across files."""
+        # TODO: Implement actual narrative arc analysis
+        return "Planning → Implementation → Testing → Optimization"
+    
+    def _extract_key_challenges(self, files: List[Dict]) -> List[str]:
+        """Extract key challenges from files."""
+        # TODO: Implement actual challenge extraction
+        return [
+            "Complex system integration",
+            "Performance optimization",
+            "Error handling"
+        ]
+    
+    def _extract_solutions(self, files: List[Dict]) -> List[str]:
+        """Extract implemented solutions from files."""
+        # TODO: Implement actual solution extraction
+        return [
+            "Modular architecture",
+            "Caching system",
+            "Robust error recovery"
+        ]
+    
+    def _extract_technical_stack(self, files: List[Dict]) -> List[str]:
+        """Extract technical stack information from files."""
+        # TODO: Implement actual tech stack extraction
+        return [
+            "Python",
+            "AI/ML",
+            "APIs"
+        ]
+    
+    def _extract_business_outcomes(self, files: List[Dict]) -> List[str]:
+        """Extract business outcomes from files."""
+        # TODO: Implement actual outcome extraction
+        return [
+            "Improved efficiency",
+            "Reduced errors",
+            "Better user experience"
+        ]
+    
+    def _format_bullet_points(self, items: List[str]) -> str:
+        """Format a list of items as bullet points."""
+        return "\n".join(f"• {item}" for item in items)
+
+    async def _done_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /done command to finish batch upload and process files."""
+        user_id = update.effective_user.id
+        
+        # Check if user has an active batch session
+        session = self.user_sessions.get(user_id, {})
+        if not session or session.get('mode') != 'multi':
+            await self._send_formatted_message(update, "❌ No active batch session. Use /batch to start multi-file mode.")
+            return
+        
+        files = session.get('files', [])
+        if not files:
+            await self._send_formatted_message(update, "❌ No files uploaded yet. Upload some markdown files first.")
+            return
+        
+        # Send processing message
+        processing_msg = await self._send_formatted_message(update, "🔄 **Processing Batch Upload**\n\n"
+            f"📚 Processing {len(files)} files...\n"
+            "⏳ This may take a few minutes...")
+        
+        try:
+            # Update session state
+            session['state'] = 'processing'
+            
+            # Analyze all files
+            project_analysis = {
+                'project_theme': self._extract_project_theme(files),
+                'narrative_arc': self._analyze_narrative_arc(files),
+                'key_challenges': self._extract_key_challenges(files),
+                'solutions': self._extract_solutions(files),
+                'technical_stack': self._extract_technical_stack(files),
+                'business_outcomes': self._extract_business_outcomes(files)
             }
             
-            markdown_content = session['original_markdown']
-            post_data = self.ai_generator.regenerate_post(
-                markdown_content,
-                feedback=f"User requested regeneration of Post {post_id}",
-                session_context=session_context,
-                previous_posts=previous_posts,
-                relationship_type=post_to_regenerate.get('relationship_type'),
-                parent_post_id=post_to_regenerate.get('parent_post_id')
-            )
+            # Generate content strategy
+            content_strategy = {
+                'recommended_sequence': self._suggest_posting_sequence(files),
+                'cross_references': self._generate_cross_references(files),
+                'tone_suggestions': self._suggest_tones(files),
+                'audience_split': self._analyze_audience_split(files)
+            }
             
-            # Update the post in the series
-            for i, post in enumerate(posts):
-                if post['post_id'] == post_id:
-                    posts[i].update({
-                        'content': post_data.get('post_content', ''),
-                        'tone_used': post_data.get('tone_used', 'Unknown'),
-                        'content_summary': post_data.get('post_content', '')[:100] + '...' if len(post_data.get('post_content', '')) > 100 else post_data.get('post_content', ''),
-                        'approved_at': datetime.now().isoformat()
-                    })
-                    break
+            # Update session with analysis and strategy
+            session['project_analysis'] = project_analysis
+            session['content_strategy'] = content_strategy
+            session['state'] = 'ready_for_generation'
             
-            # Update Airtable record
-            try:
-                record_id = post_to_regenerate.get('airtable_record_id')
-                if record_id:
-                    self.airtable.airtable.update(record_id, {
-                        'Generated Draft': post_data.get('post_content', ''),
-                        'AI Notes or Edits': f"Post regenerated on {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n{post_data.get('tone_reason', '')}"
-                    })
-            except Exception as e:
-                logger.warning(f"Failed to update Airtable record: {e}")
+            # Show strategy summary
+            strategy_message = f"""
+📋 **Content Strategy Ready**
+
+**Project Theme:** {project_analysis['project_theme']}
+**Files Processed:** {len(files)}
+
+**Recommended Post Sequence:**
+{self._format_post_sequence(content_strategy['recommended_sequence'])}
+
+**Suggested Audience Split:**
+{self._format_audience_split(content_strategy['audience_split'])}
+
+**Next Steps:**
+1. Review the strategy
+2. Choose post generation order
+3. Start content generation
+
+Would you like to:
+A) Use AI recommended sequence
+B) Customize sequence
+C) Generate posts one by one
+            """
             
-            # Update session context
-            self._update_session_context(query.from_user.id)
+            # Create inline keyboard for options
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Use AI Strategy", callback_data="use_ai_strategy"),
+                    InlineKeyboardButton("✏️ Customize", callback_data="customize_strategy")
+                ],
+                [
+                    InlineKeyboardButton("📝 Manual Selection", callback_data="manual_selection")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
             
-            await query.edit_message_text(
-                f"✅ Post {post_id} regenerated successfully\n\n"
-                f"New tone: {post_data.get('tone_used', 'Unknown')}\n"
-                f"Content preview: {post_data.get('post_content', '')[:100]}...\n\n"
-                f"The post has been updated in your series and Airtable."
-            )
-            
-            # Return to series overview after 3 seconds
-            await asyncio.sleep(3)
-            await self._show_series_overview(query, None)
+            await self._send_formatted_message(processing_msg, strategy_message.strip(), reply_markup=reply_markup)
             
         except Exception as e:
-            await query.edit_message_text(
-                f"❌ Error regenerating post: {str(e)}"
-            )
+            logger.error(f"Error processing batch: {str(e)}")
+            await self._send_formatted_message(processing_msg, f"❌ **Error processing batch:** {str(e)}")
     
-    async def _view_individual_post(self, query, session, post_id: int):
-        """View details of an individual post."""
-        posts = session.get('posts', [])
-        post_to_view = None
+    def _suggest_posting_sequence(self, files: List[Dict]) -> List[Dict]:
+        """Suggest optimal posting sequence for files."""
+        # Sort files by upload timestamp as a basic sequence
+        sequence = sorted(files, key=lambda x: x['upload_timestamp'])
+        return [{'file': f, 'reason': 'Chronological order'} for f in sequence]
+    
+    def _generate_cross_references(self, files: List[Dict]) -> List[Dict]:
+        """Generate cross-reference suggestions between files."""
+        # TODO: Implement actual cross-reference generation
+        return []
+    
+    def _suggest_tones(self, files: List[Dict]) -> List[Dict]:
+        """Suggest tones for each file based on content."""
+        # TODO: Implement actual tone suggestion logic
+        return [{'file': f, 'tone': 'Behind-the-Build'} for f in files]
+    
+    def _analyze_audience_split(self, files: List[Dict]) -> Dict:
+        """Analyze optimal audience targeting split."""
+        return {
+            'technical': len(files) // 2,
+            'business': len(files) - (len(files) // 2)
+        }
+    
+    def _format_post_sequence(self, sequence: List[Dict]) -> str:
+        """Format post sequence for display."""
+        return "\n".join(f"{i+1}. {post['file']['filename']} ({post['reason']})"
+                        for i, post in enumerate(sequence))
+    
+    def _format_audience_split(self, split: Dict) -> str:
+        """Format audience split for display."""
+        return f"• Technical Posts: {split['technical']}\n• Business Posts: {split['business']}"
+
+    async def _strategy_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /strategy command to show content strategy in batch mode."""
+        user_id = update.effective_user.id
         
-        for post in posts:
-            if post['post_id'] == post_id:
-                post_to_view = post
-                break
-        
-        if not post_to_view:
-            await query.edit_message_text("❌ Post not found.")
+        # Check if user has an active batch session
+        session = self.user_sessions.get(user_id, {})
+        if not session or session.get('mode') != 'multi':
+            await self._send_formatted_message(update, "❌ No active batch session. Use /batch to start multi-file mode.")
             return
         
-        # Format post details
-        post_content = post_to_view.get('content', '')
-        if len(post_content) > 1000:
-            display_content = post_content[:1000] + "\n\n📝 [Content truncated for display]"
+        files = session.get('files', [])
+        if not files:
+            await self._send_formatted_message(update, "❌ No files uploaded yet. Upload some markdown files first.")
+            return
+        
+        # Send analyzing message
+        analyzing_msg = await self._send_formatted_message(update, "🎯 Generating Content Strategy\n\n"
+            "⏳ Analyzing files...")
+        
+        try:
+            # Generate content strategy
+            content_strategy = {
+                'recommended_sequence': self._suggest_posting_sequence(files),
+                'cross_references': self._generate_cross_references(files),
+                'tone_suggestions': self._suggest_tones(files),
+                'audience_split': self._analyze_audience_split(files),
+                'posting_timeline': self._suggest_posting_timeline(len(files))
+            }
+            
+            # Store strategy in session
+            session['content_strategy'] = content_strategy
+            
+            # Format strategy message
+            strategy_message = (
+                "📋 Content Strategy\n\n"
+                f"Files: {len(files)} files\n"
+                f"Posts: {len(content_strategy['recommended_sequence'])} planned\n"
+                f"Timeline: {content_strategy['posting_timeline']}\n\n"
+                "Choose your approach:"
+            )
+            
+            # Create inline keyboard with consistent callback data
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Use AI Strategy", callback_data="use_ai_strategy"),
+                    InlineKeyboardButton("✏️ Customize", callback_data="customize_strategy")
+                ],
+                [
+                    InlineKeyboardButton("📝 Manual Selection", callback_data="manual_selection"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_strategy")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(analyzing_msg, text=strategy_message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            logger.error(f"Error generating strategy: {str(e)}")
+            await self._send_formatted_message(analyzing_msg, "❌ Error generating strategy. Please try again.")
+
+    async def _cancel_batch_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /cancel command to exit batch mode."""
+        user_id = update.effective_user.id
+        
+        if user_id in self.user_sessions:
+            session = self.user_sessions[user_id]
+            if session.get('mode') == 'multi':
+                del self.user_sessions[user_id]
+                await self._send_formatted_message(update, "✅ Batch mode cancelled. All uploaded files have been cleared.")
+            else:
+                await self._send_formatted_message(update, "❌ No active batch session to cancel.")
         else:
-            display_content = post_content
+            await self._send_formatted_message(update, "❌ No active session to cancel.")
+
+    def _suggest_posting_timeline(self, file_count: int) -> str:
+        """Suggest optimal posting timeline based on file count."""
+        if file_count <= 3:
+            return "1 week (2-3 posts per week)"
+        elif file_count <= 5:
+            return "2 weeks (2-3 posts per week)"
+        else:
+            return "3 weeks (2-3 posts per week)"
+
+    def _format_tone_distribution(self, tone_suggestions: List[Dict]) -> str:
+        """Format tone distribution for display."""
+        tone_counts = {}
+        for suggestion in tone_suggestions:
+            tone = suggestion['tone']
+            tone_counts[tone] = tone_counts.get(tone, 0) + 1
         
-        post_details = f"""📝 **Post {post_id} Details**
+        return "\n".join(f"• {tone}: {count} post(s)" for tone, count in tone_counts.items())
 
-**Tone:** {post_to_view['tone_used']}
-**Created:** {post_to_view.get('approved_at', 'Unknown')}
-**Airtable ID:** {post_to_view.get('airtable_record_id', 'Unknown')}
-
-**Relationship Info:**
-• Type: {post_to_view.get('relationship_type', 'None')}
-• Parent Post: {post_to_view.get('parent_post_id', 'None')}
-
-**Content:**
-───────────────────────────
-{display_content}
-───────────────────────────"""
+    def _format_cross_references(self, cross_refs: List[Dict]) -> str:
+        """Format cross-references for display."""
+        if not cross_refs:
+            return "No explicit cross-references suggested"
         
-        # Create action buttons
+        formatted_refs = []
+        for ref in cross_refs:
+            formatted_refs.append(f"• {ref['from_file']} → {ref['to_file']}: {ref['type']}")
+        return "\n".join(formatted_refs)
+
+    async def _handle_strategy_callback(self, query, session: Dict):
+        """Handle strategy selection callbacks."""
+        callback_data = query.data
+        
+        try:
+            if callback_data == "use_ai_strategy":
+                await self._handle_ai_strategy(query, session)
+            elif callback_data == "customize_strategy":
+                await self._show_strategy_customization(query, session)
+            elif callback_data == "manual_selection":
+                await self._show_manual_file_selection(query, session)
+            elif callback_data == "cancel_strategy":
+                await self._cancel_batch_command(query, None)
+            else:
+                # Log unexpected callback data
+                logger.warning(f"Unexpected callback data: {callback_data}")
+                await query.answer("Invalid option")
+                
+        except Exception as e:
+            logger.error(f"Error in strategy callback: {str(e)}")
+            await query.answer("Error processing selection")
+
+    async def _handle_ai_strategy(self, query, session: Dict):
+        """Handle AI strategy selection."""
+        try:
+            # Update message to show processing
+            processing_message = (
+                "🔄 Processing Files\n\n"
+                "Analyzing files and generating content sequence..."
+            )
+            
+            await self._send_formatted_message(query, processing_message)
+            
+            # Generate posts using AI strategy
+            await self._generate_batch_posts(query, session)
+            
+        except Exception as e:
+            logger.error(f"Error handling AI strategy: {str(e)}")
+            await self._send_formatted_message(query, "❌ Error processing AI strategy. Please try again.")
+
+    async def _show_strategy_customization(self, query, session: Dict):
+        """Show interface for customizing content strategy."""
+        try:
+            sequence = session['content_strategy']['recommended_sequence']
+            
+            # Create message with current sequence
+            message = "✏️ **Customize Post Sequence**\n\n"
+            message += "Current sequence:\n"
+            for i, post in enumerate(sequence, 1):
+                message += f"{i}. {post['file']['filename']} ({post['reason']})\n"
+            
+            message += "\nUse the buttons below to modify the sequence:"
+            
+            # Create keyboard for reordering
+            keyboard = []
+            for i, post in enumerate(sequence):
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"📝 Edit #{i+1}: {post['file']['filename'][:20]}...",
+                        callback_data=f"edit_post_{i}"
+                    )
+                ])
+            
+            keyboard.append([
+                InlineKeyboardButton("✅ Confirm Sequence", callback_data="confirm_sequence"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cancel_strategy")
+            ])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(query, message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            logger.error(f"Error showing customization: {str(e)}")
+            await self._send_formatted_message(query, f"❌ **Error:** {str(e)}")
+
+    async def _show_manual_file_selection(self, query, session: Dict):
+        """Show interface for manual file selection."""
+        try:
+            files = session.get('files', [])
+            selected_files = session.get('selected_files', [])
+            
+            message = "📝 **Manual File Selection**\n\n"
+            message += f"Selected: {len(selected_files)}/{len(files)} files\n\n"
+            
+            # Create keyboard with all files
+            keyboard = []
+            for i, file in enumerate(files):
+                is_selected = any(sf['file_id'] == file['file_id'] for sf in selected_files)
+                status = "✅" if is_selected else "⭕️"
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"{status} {file['filename']}",
+                        callback_data=f"select_file_{file['file_id']}"
+                    )
+                ])
+            
+            # Add control buttons
+            if selected_files:
+                keyboard.append([
+                    InlineKeyboardButton("✨ Generate Posts", callback_data="manual_generate"),
+                    InlineKeyboardButton("🔄 Clear Selection", callback_data="manual_clear")
+                ])
+            
+            keyboard.append([
+                InlineKeyboardButton("⬅️ Back", callback_data="back_to_strategy")
+            ])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await self._send_formatted_message(query, message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            logger.error(f"Error showing file selection: {str(e)}")
+            await self._send_formatted_message(query, f"❌ **Error:** {str(e)}")
+
+    async def _handle_file_selection(self, query, session: Dict):
+        """Handle individual file selection."""
+        try:
+            callback_data = query.data
+            file_id = callback_data.replace("select_file_", "")
+            
+            # Initialize selected files if not exists
+            if 'selected_files' not in session:
+                session['selected_files'] = []
+            
+            # Find the file in the files list
+            selected_file = None
+            for file in session['files']:
+                if file['file_id'] == file_id:
+                    selected_file = file
+                    break
+            
+            if not selected_file:
+                await query.answer("File not found")
+                return
+            
+            # Toggle selection
+            is_selected = any(sf['file_id'] == file_id for sf in session['selected_files'])
+            if is_selected:
+                session['selected_files'] = [sf for sf in session['selected_files'] if sf['file_id'] != file_id]
+                await query.answer(f"Removed {selected_file['filename']}")
+            else:
+                session['selected_files'].append(selected_file)
+                await query.answer(f"Added {selected_file['filename']}")
+            
+            # Refresh the selection interface
+            await self._handle_manual_file_selection(query, session)
+            
+        except Exception as e:
+            logger.error(f"Error handling file selection: {str(e)}")
+            await self._send_formatted_message(query, f"❌ **Error:** {str(e)}")
+
+    async def _handle_manual_generation(self, query, session: Dict):
+        """Handle generation of posts for manually selected files."""
+        try:
+            selected_files = session.get('selected_files', [])
+            if not selected_files:
+                await query.answer("No files selected")
+                return
+            
+            # Update message to show processing
+            await self._send_formatted_message(query, 
+                f"🔄 Processing {len(selected_files)} Files\n\n"
+                "Generating posts in your selected order...")
+            
+            # Process files sequentially
+            for file in selected_files:
+                try:
+                    # Generate post for this file
+                    post_data = await self._process_in_background(
+                        self.ai_generator.generate_facebook_post,
+                        file['content'],
+                        user_tone_preference=session.get('selected_tone'),
+                        audience_type='business'
+                    )
+                    
+                    # Store the post
+                    if 'posts' not in session:
+                        session['posts'] = []
+                    session['posts'].append(post_data)
+                    
+                    # Show progress
+                    current_count = len(session['posts'])
+                    await self._send_formatted_message(
+                        query,
+                        f"✅ Generated post {current_count}/{len(selected_files)}\n"
+                        f"File: {file['filename']}\n"
+                        f"Tone: {post_data.get('tone_used', 'Unknown')}"
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"Error generating post for {file['filename']}: {str(e)}")
+                    await self._send_formatted_message(
+                        query,
+                        f"⚠️ Failed to generate post for {file['filename']}: {str(e)}"
+                    )
+            
+            # Show completion message
+            await self._show_batch_completion(query, session)
+            
+        except Exception as e:
+            logger.error(f"Error in manual generation: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error: {str(e)}")
+
+    async def _handle_manual_clear(self, query, session: Dict):
+        """Clear manual file selection."""
+        try:
+            session['selected_files'] = []
+            await query.answer("Selection cleared")
+            await self._handle_manual_file_selection(query, session)
+        except Exception as e:
+            logger.error(f"Error clearing selection: {str(e)}")
+            await self._send_formatted_message(query, f"❌ **Error:** {str(e)}")
+
+    async def _process_in_background(self, func, *args, **kwargs):
+        """Process heavy operations in background."""
+        try:
+            return await asyncio.to_thread(func, *args, **kwargs)
+        except Exception as e:
+            logger.error(f"Background processing error: {str(e)}")
+            raise
+
+    async def _analyze_project_files(self, files: List[Dict]) -> Dict:
+        """Analyze project files in background."""
+        try:
+            # Run heavy analysis in background
+            results = await asyncio.gather(
+                self._process_in_background(self._extract_project_theme, files),
+                self._process_in_background(self._analyze_narrative_arc, files),
+                self._process_in_background(self._extract_key_challenges, files),
+                self._process_in_background(self._extract_solutions, files),
+                self._process_in_background(self._extract_technical_stack, files),
+                self._process_in_background(self._extract_business_outcomes, files)
+            )
+            
+            return {
+                'theme': results[0],
+                'narrative_arc': results[1],
+                'key_challenges': results[2],
+                'solutions': results[3],
+                'technical_stack': results[4],
+                'business_outcomes': results[5]
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing project files: {str(e)}")
+            raise
+
+    async def _generate_content_strategy(self, files: List[Dict]) -> Dict:
+        """Generate content strategy in background."""
+        try:
+            # Run strategy generation in background
+            results = await asyncio.gather(
+                self._process_in_background(self._suggest_posting_sequence, files),
+                self._process_in_background(self._generate_cross_references, files),
+                self._process_in_background(self._suggest_tones, files),
+                self._process_in_background(self._analyze_audience_split, files)
+            )
+            
+            return {
+                'recommended_sequence': results[0],
+                'cross_references': results[1],
+                'tone_suggestions': results[2],
+                'audience_split': results[3],
+                'posting_timeline': self._suggest_posting_timeline(len(files))
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generating content strategy: {str(e)}")
+            raise
+
+    async def _generate_batch_posts(self, query, session: Dict):
+        """Generate posts for all files in batch mode."""
+        try:
+            files = session.get('files', [])
+            total_files = len(files)
+            
+            # Initialize progress message
+            progress_msg = await self._send_formatted_message(query, "🚀 Generating Content Series\n\n"
+                "Processing files...\n"
+                "⏳ This may take a few minutes...")
+            
+            # Process files in parallel batches
+            batch_size = 3  # Process 3 files at a time
+            posts = []
+            
+            for i in range(0, total_files, batch_size):
+                batch = files[i:i + batch_size]
+                tasks = []
+                
+                # Create tasks for parallel processing
+                for file_data in batch:
+                    previous_files = files[:i]  # Files processed before this one
+                    task = self._process_in_background(
+                        self.ai_generator.generate_facebook_post,
+                        file_data['content'],
+                        user_tone_preference=session.get('selected_tone'),
+                        audience_type='business'
+                    )
+                    tasks.append(task)
+                
+                # Wait for batch to complete
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Process results
+                for j, result in enumerate(batch_results):
+                    if isinstance(result, Exception):
+                        logger.error(f"Error generating post: {str(result)}")
+                        continue
+                    
+                    posts.append(result)
+                    
+                    # Update progress
+                    current_count = i + j + 1
+                    await self._send_formatted_message(
+                        progress_msg,
+                        f"🚀 Generating Content Series\n\n"
+                        f"Processed {current_count}/{total_files} files\n"
+                        f"✅ Generated {len(posts)} posts\n\n"
+                        "⏳ Processing..."
+                    )
+            
+            # Store generated posts
+            session['posts'] = posts
+            session['state'] = 'batch_complete'
+            
+            # Show completion message
+            await self._show_batch_completion(query, session)
+            
+        except Exception as e:
+            logger.error(f"Error generating batch posts: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error generating posts: {str(e)}")
+
+    async def _show_batch_completion(self, query, session: Dict):
+        """Show completion message and options after generating all posts."""
+        try:
+            posts = session.get('posts', [])
+            
+            message = f"""✅ Batch Processing Complete!
+
+Generated {len(posts)} posts from {len(session['files'])} files.
+
+Options:
+• View all posts
+• Export series
+• Start new batch"""
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("👀 View Posts", callback_data="view_batch_posts"),
+                    InlineKeyboardButton("📤 Export", callback_data="export_batch")
+                ],
+                [
+                    InlineKeyboardButton("🆕 New Batch", callback_data="new_batch")
+                ]
+            ]
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(query, message.strip(), reply_markup=reply_markup)
+            
+        except Exception as e:
+            logger.error(f"Error showing completion: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error: {str(e)}")
+
+    async def _view_batch_posts(self, query, session: Dict):
+        """View all posts generated in the batch."""
+        try:
+            posts = session.get('posts', [])
+            files = session.get('files', [])
+            
+            if not posts:
+                await self._send_formatted_message(query, "❌ No posts found in this batch.")
+                return
+            
+            message_parts = [f"📚 Batch Posts ({len(posts)} posts)"]
+            
+            for i, post in enumerate(posts, 1):
+                tone = post.get('tone_used', 'Unknown')
+                content_preview = post.get('post_content', '')[:100] + '...' if len(post.get('post_content', '')) > 100 else post.get('post_content', '')
+                
+                # Try to match with original file
+                file_name = "Unknown file"
+                if i <= len(files):
+                    file_name = files[i-1].get('filename', 'Unknown file')
+                
+                message_parts.append(f"\n{i}. {file_name}")
+                message_parts.append(f"   Tone: {tone}")
+                message_parts.append(f"   Preview: {content_preview}")
+            
+            message = "\n".join(message_parts)
+            
+            # Add navigation buttons
+            keyboard = [
+                [
+                    InlineKeyboardButton("📤 Export All", callback_data="export_batch"),
+                    InlineKeyboardButton("🆕 New Batch", callback_data="new_batch")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(query, self._truncate_message(message), reply_markup=reply_markup)
+            
+        except Exception as e:
+            logger.error(f"Error viewing batch posts: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error viewing posts: {str(e)}")
+
+    async def _export_batch_series(self, query, session: Dict):
+        """Export the batch series as a document."""
+        try:
+            posts = session.get('posts', [])
+            files = session.get('files', [])
+            
+            if not posts:
+                await self._send_formatted_message(query, "❌ No posts to export.")
+                return
+            
+            # Create export content
+            export_content = f"# Batch Generated Posts\n\n"
+            export_content += f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+            export_content += f"**Total Posts:** {len(posts)}\n"
+            export_content += f"**Total Files:** {len(files)}\n\n"
+            
+            for i, post in enumerate(posts, 1):
+                tone = post.get('tone_used', 'Unknown')
+                content = post.get('post_content', 'No content')
+                
+                # Try to match with original file
+                file_name = "Unknown file"
+                if i <= len(files):
+                    file_name = files[i-1].get('filename', 'Unknown file')
+                
+                export_content += f"## Post {i}: {file_name}\n\n"
+                export_content += f"**Tone:** {tone}\n\n"
+                export_content += f"**Content:**\n{content}\n\n"
+                export_content += "---\n\n"
+            
+            # Send as file
+            from io import BytesIO
+            file_buffer = BytesIO(export_content.encode('utf-8'))
+            file_buffer.name = f"batch_posts_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
+            
+            await self._send_formatted_message(query, "📤 Batch Posts Export", document=file_buffer)
+            
+        except Exception as e:
+            logger.error(f"Error exporting batch: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error exporting: {str(e)}")
+
+    async def _start_new_batch(self, query, user_id: int):
+        """Start a new batch session."""
+        try:
+            # Clear existing session
+            if user_id in self.user_sessions:
+                del self.user_sessions[user_id]
+            
+            # Create new batch session
+            self.user_sessions[user_id] = {
+                'mode': 'multi',
+                'files': [],
+                'session_started': datetime.now().isoformat(),
+                'last_activity': datetime.now().isoformat(),
+                'state': 'collecting_files'
+            }
+            
+            message = """🆕 New Batch Started!
+
+Upload your markdown files (max 8).
+
+Commands:
+• /project - View project analysis
+• /strategy - Get content strategy  
+• /done - Finish uploading
+• /cancel - Exit batch mode"""
+            
+            await self._send_formatted_message(query, message)
+            
+        except Exception as e:
+            logger.error(f"Error starting new batch: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error starting new batch: {str(e)}")
+
+    async def _show_strategy_options(self, query, session: Dict):
+        """Show strategy options to the user."""
+        message = """🎯 Choose Your Strategy
+
+How would you like to proceed with content generation?
+
+Options:
+• AI Strategy - Let AI optimize the sequence and tone selection
+• Custom Strategy - Manually arrange posts and select tones
+• Manual Selection - Process files one by one"""
+        
         keyboard = [
             [
-                InlineKeyboardButton("🔄 Regenerate", callback_data=f"post_regenerate_{post_id}"),
-                InlineKeyboardButton("🗑️ Delete", callback_data=f"post_delete_{post_id}")
+                InlineKeyboardButton("✅ Use AI Strategy", callback_data="use_ai_strategy"),
+                InlineKeyboardButton("✏️ Customize", callback_data="customize_strategy")
             ],
             [
-                InlineKeyboardButton("⬅️ Back to Series", callback_data="series_refresh")
+                InlineKeyboardButton("📝 Manual Selection", callback_data="manual_selection"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cancel")
             ]
         ]
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            post_details.strip(),
-            reply_markup=reply_markup
-        )
-    
-    async def _show_post_management(self, query, user_id: int):
-        """Show post management interface with all posts."""
-        if user_id not in self.user_sessions:
-            await query.edit_message_text("❌ Session expired. Please upload a new file.")
-            return
-        
-        session = self.user_sessions[user_id]
-        posts = session.get('posts', [])
-        
-        if not posts:
-            await query.edit_message_text(
-                "❌ **No posts to manage**\n\n"
-                "Create some posts first before managing them.",
-                parse_mode='Markdown'
+        await self._send_formatted_message(query, message.strip(), reply_markup=reply_markup)
+
+    async def _handle_initial_tone_selection(self, query, session: Dict, callback_data: str):
+        """Handle initial tone selection from the enhanced interface."""
+        try:
+            if callback_data == "initial_ai_choose":
+                # Let AI choose the best tone
+                await self._generate_with_ai_chosen_tone(query, session)
+            elif callback_data.startswith("initial_tone_"):
+                # Extract tone from callback data
+                tone = callback_data.replace("initial_tone_", "").replace("_", " ")
+                # Map callback data back to proper tone names
+                tone_mapping = {
+                    "behind_the_build": "Behind-the-Build",
+                    "what_broke": "What Broke",
+                    "finished_proud": "Finished & Proud",
+                    "problem_solution_result": "Problem → Solution → Result",
+                    "mini_lesson": "Mini Lesson"
+                }
+                actual_tone = tone_mapping.get(tone.lower().replace(" ", "_"), tone.title())
+                await self._generate_with_initial_tone(query, session, actual_tone)
+            else:
+                logger.warning(f"Unknown initial tone callback: {callback_data}")
+                await self._send_formatted_message(query, "❌ Invalid tone selection. Please try again.")
+        except Exception as e:
+            logger.error(f"Error handling initial tone selection: {str(e)}")
+            await self._send_formatted_message(query, "❌ Error processing tone selection. Please try again.")
+
+    async def _generate_with_ai_chosen_tone(self, query, session: Dict):
+        """Generate post with AI-chosen tone."""
+        try:
+            await self._send_formatted_message(query, "🤖 AI is choosing the best tone for your content...")
+            
+            # Generate post with AI tone selection
+            markdown_content = session['original_markdown']
+            post_data = self.ai_generator.generate_facebook_post(
+                markdown_content,
+                user_tone_preference=None,  # Let AI choose
+                audience_type='business'
             )
-            return
-        
-        # Create post management message
-        management_message = f"""
-🔧 **Post Management**
+            
+            # Store and show the post
+            session['current_draft'] = post_data
+            await self._show_generated_post(query, post_data, session)
+            
+        except Exception as e:
+            logger.error(f"Error generating with AI tone: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error generating post: {str(e)}")
 
-Series: {session.get('filename', 'Unknown')}
-Total Posts: {len(posts)}
+    async def _generate_with_initial_tone(self, query, session: Dict, tone: str):
+        """Generate post with specific initial tone."""
+        try:
+            await self._send_formatted_message(query, f"🎨 Generating post with {tone} tone...")
+            
+            # Generate post with specified tone
+            markdown_content = session['original_markdown']
+            post_data = self.ai_generator.generate_facebook_post(
+                markdown_content,
+                user_tone_preference=tone,
+                audience_type='business'
+            )
+            
+            # Store and show the post
+            session['current_draft'] = post_data
+            await self._show_generated_post(query, post_data, session)
+            
+        except Exception as e:
+            logger.error(f"Error generating with tone {tone}: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error generating post: {str(e)}")
 
-**Select a post to manage:**
-        """
-        
-        # Create buttons for each post
-        keyboard = []
-        for post in posts:
-            post_snippet = post.get('content_summary', 'No summary')[:40] + '...'
-            tone_emoji = self._get_tone_emoji(post['tone_used'])
-            button_text = f"{tone_emoji} Post {post['post_id']}: {post_snippet}"
-            callback_data = f"post_view_{post['post_id']}"
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
-        
-        # Add navigation buttons
-        keyboard.append([InlineKeyboardButton("⬅️ Back to Series", callback_data="series_refresh")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            management_message.strip(),
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
+    async def _show_initial_tone_selection_from_callback(self, query, session: Dict):
+        """Show initial tone selection interface from callback."""
+        try:
+            # This recreates the initial tone selection interface
+            await self._show_initial_tone_selection_interface(query, session)
+        except Exception as e:
+            logger.error(f"Error showing tone selection: {str(e)}")
+            await self._send_formatted_message(query, "❌ Error showing tone selection. Please try again.")
+
+    async def _show_initial_tone_selection_interface(self, query, session: Dict):
+        """Show the initial tone selection interface."""
+        try:
+            # Get tone options
+            tone_options = self.ai_generator.get_tone_options()
+            
+            # Analyze content for recommendations
+            markdown_content = session['original_markdown']
+            content_analysis = self._analyze_content_for_tone_recommendations(markdown_content)
+            
+            # Create message
+            filename = session['filename']
+            file_display = filename.replace('.md', '').replace('_', ' ').title()
+            
+            message_parts = [
+                "🎨 Choose Your Tone Style",
+                f"📄 File: {file_display}",
+                "",
+                "Smart Recommendations:"
+            ]
+            
+            # Add content-based recommendations
+            if content_analysis['recommended_tones']:
+                for tone in content_analysis['recommended_tones'][:2]:
+                    message_parts.append(f"• 🎯 {tone} - {content_analysis['reasons'][tone]}")
+            
+            message_parts.extend([
+                "",
+                "Available Tones:",
+                "Choose the style that best fits your content:"
+            ])
+            
+            # Create keyboard
+            keyboard = []
+            
+            # Add recommended tones first
+            if content_analysis['recommended_tones']:
+                for tone in content_analysis['recommended_tones'][:2]:
+                    callback_data = self._create_tone_callback_data(tone)
+                    keyboard.append([InlineKeyboardButton(f"🎯 {tone} (Recommended)", callback_data=f"initial_{callback_data}")])
+            
+            # Add all tone options
+            for tone in tone_options:
+                if tone not in content_analysis['recommended_tones']:
+                    callback_data = self._create_tone_callback_data(tone)
+                    keyboard.append([InlineKeyboardButton(f"🎨 {tone}", callback_data=f"initial_{callback_data}")])
+            
+            # Add special options
+            keyboard.extend([
+                [InlineKeyboardButton("🤖 Let AI Choose Best Tone", callback_data="initial_ai_choose")],
+                [InlineKeyboardButton("📊 Show Tone Previews", callback_data="show_tone_previews")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+            ])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(query, "\n".join(message_parts), reply_markup=reply_markup)
+            
+        except Exception as e:
+            logger.error(f"Error showing tone selection interface: {str(e)}")
+            await self._send_formatted_message(query, "❌ Error showing tone selection. Please try again.")
+
+    async def _show_tone_options(self, query, session: Dict):
+        """Show tone options for regenerating post."""
+        try:
+            # Get available tones
+            tone_options = self.ai_generator.get_tone_options()
+            
+            message = "🎨 Choose a different tone for your post:\n\n"
+            
+            # Create keyboard with tone options
+            keyboard = []
+            for tone in tone_options:
+                callback_data = self._create_tone_callback_data(tone)
+                keyboard.append([InlineKeyboardButton(f"🎨 {tone}", callback_data=f"tone_{callback_data}")])
+            
+            # Add back button
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="back_to_post")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(query, message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            logger.error(f"Error showing tone options: {str(e)}")
+            await self._send_formatted_message(query, "❌ Error showing tone options. Please try again.")
+
+    async def _show_current_post(self, query, session: Dict):
+        """Show the current post being reviewed."""
+        try:
+            current_draft = session.get('current_draft')
+            if not current_draft:
+                await self._send_formatted_message(query, "❌ No current post to show.")
+                return
+            
+            # Show the current post
+            await self._show_generated_post(query, current_draft, session)
+            
+        except Exception as e:
+            logger.error(f"Error showing current post: {str(e)}")
+            await self._send_formatted_message(query, "❌ Error showing current post. Please try again.")
+
+    async def _cancel_followup(self, query, session):
+        """Cancel follow-up post generation and return to options."""
+        try:
+            await self._show_post_approval_options(query, session)
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error cancelling follow-up: {str(e)}")
+
+    async def _show_post_approval_options(self, query, session):
+        """Show the post approval options after successful save."""
+        try:
+            posts = session.get('posts', [])
+            filename = session['filename']
+            
+            message = f"""✅ Post Approved & Saved!
+
+File: {filename}
+Posts in Series: {len(posts)}
+
+What would you like to do next?"""
+            
+            # Create keyboard with follow-up options
+            keyboard = [
+                [
+                    InlineKeyboardButton("🔄 Generate Follow-up Post", callback_data="generate_followup"),
+                    InlineKeyboardButton("📋 View Series", callback_data="view_series")
+                ],
+                [
+                    InlineKeyboardButton("📤 Export Current Post", callback_data="export_current"),
+                    InlineKeyboardButton("✨ Done", callback_data="done_session")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(query, message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error showing options: {str(e)}")
+
+    async def _export_current_post(self, query, session):
+        """Export the current post content."""
+        try:
+            posts = session.get('posts', [])
+            if not posts:
+                await self._send_formatted_message(query, "❌ No posts to export.")
+                return
+            
+            # Get the most recent post
+            current_post = posts[-1]
+            
+            export_message = f"""📤 Current Post Export
+
+**Post {current_post['post_id']}:**
+**Tone:** {current_post['tone_used']}
+**Created:** {current_post['approved_at'][:10]}
+
+**Content:**
+{current_post['content']}
+
+**Airtable Record:** {current_post['airtable_record_id']}"""
+            
+            # Create back button
+            keyboard = [[InlineKeyboardButton("⬅️ Back to Options", callback_data="back_to_options")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(query, export_message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error exporting post: {str(e)}")
+
+    async def _export_series(self, query, session):
+        """Export all posts in the series."""
+        try:
+            posts = session.get('posts', [])
+            if not posts:
+                await self._send_formatted_message(query, "❌ No posts to export.")
+                return
+            
+            filename = session['filename']
+            export_message = f"""📤 Series Export
+
+**File:** {filename}
+**Total Posts:** {len(posts)}
+
+"""
+            
+            for i, post in enumerate(posts, 1):
+                export_message += f"""**Post {i}:**
+**Tone:** {post['tone_used']}
+**Created:** {post['approved_at'][:10]}
+**Airtable ID:** {post['airtable_record_id']}
+
+**Content:**
+{post['content']}
+
+---
+
+"""
+            
+            # Create back button
+            keyboard = [[InlineKeyboardButton("⬅️ Back to Series", callback_data="view_series")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Split message if too long
+            if len(export_message) > 4000:
+                # Send in chunks
+                chunks = [export_message[i:i+4000] for i in range(0, len(export_message), 4000)]
+                for chunk in chunks[:-1]:
+                    await self._send_formatted_message(query, chunk)
+                await self._send_formatted_message(query, chunks[-1], reply_markup=reply_markup)
+            else:
+                await self._send_formatted_message(query, export_message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error exporting series: {str(e)}")
 
 if __name__ == "__main__":
+    # Load environment variables
+    load_dotenv()
+    
+    # Create and run the bot
     bot = FacebookContentBot()
     bot.run() 

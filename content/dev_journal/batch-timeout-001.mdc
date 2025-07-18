@@ -1,0 +1,149 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Batch Processing Timeout Issues Report
+
+## Files Involved
+
+### 1. scripts/telegram_bot.py
+- **Primary File**: Contains all bot functionality
+- **Key Components**:
+  - `_batch_command`: Handles /batch command initiation
+  - `_handle_strategy_callback`: Processes strategy selection
+  - `_handle_ai_strategy`: Handles AI-based content generation
+  - `_strategy_command`: Manages content strategy display
+
+## Previous Problems (Now Fixed)
+
+### 1. Timeout Issues ✅
+- **Symptom**: Telegram API calls consistently timing out
+- **Solution**: 
+  - Implemented `RetryingRequest` class with automatic retry logic
+  - Increased timeouts (60s for read/write, 45s for connect/pool)
+  - Added proper error handling for network issues
+  - Increased connection pool size to 16
+
+### 2. Message Formatting Errors ✅
+- **Symptom**: MarkdownV2 parsing failures
+- **Solution**:
+  - Added `_format_message` utility for consistent formatting
+  - Added `_send_formatted_message` with error handling
+  - Standardized all message sending through these utilities
+  - Added proper escaping for special characters
+
+### 3. Callback Data Inconsistency ✅
+- **Symptom**: Callback handlers failing to process button actions
+- **Solution**:
+  - Added `_create_callback_data` and `_parse_callback_data` utilities
+  - Implemented structured action handlers
+  - Added comprehensive error handling for callbacks
+  - Fixed parse_mode parameter conflicts
+
+## Implemented Solutions
+
+### 1. Background Processing
+```python
+async def _process_in_background(self, func, *args, **kwargs):
+    """Process heavy operations in background."""
+    try:
+        return await asyncio.to_thread(func, *args, **kwargs)
+    except Exception as e:
+        logger.error(f"Background processing error: {str(e)}")
+        raise
+```
+
+### 2. Parallel Batch Processing
+```python
+# Process files in parallel batches
+batch_size = 3  # Process 3 files at a time
+for i in range(0, total_files, batch_size):
+    batch = files[i:i + batch_size]
+    tasks = []
+    
+    # Create tasks for parallel processing
+    for file_data in batch:
+        task = self._process_in_background(
+            self.ai_generator.generate_post,
+            file_data['content'],
+            tone=session.get('selected_tone')
+        )
+        tasks.append(task)
+    
+    # Wait for batch to complete
+    batch_results = await asyncio.gather(*tasks)
+```
+
+### 3. Message Formatting
+```python
+def _format_message(self, text: str, use_markdown: bool = True) -> Dict[str, str]:
+    """Format message with proper escaping and parse mode."""
+    if not use_markdown:
+        return {'text': text, 'parse_mode': None}
+    
+    escaped_text = self._escape_markdown(text)
+    return {'text': escaped_text, 'parse_mode': ParseMode.MARKDOWN_V2}
+```
+
+## Current Status
+- **Severity**: ✅ Fixed
+- **Impact**: Users can now use batch processing reliably
+- **Priority**: Monitoring for any new issues
+
+## Improvements Made
+
+### 1. Performance
+- Parallel processing of files in batches
+- Background processing for heavy operations
+- Increased connection pool size
+- Optimized timeouts
+
+### 2. Reliability
+- Automatic retry logic for failed requests
+- Comprehensive error handling
+- Progress updates for long operations
+- Session state management
+
+### 3. User Experience
+- Consistent message formatting
+- Clear error messages
+- Progress indicators
+- Cancellable operations
+
+## Monitoring Plan
+
+1. **Performance Metrics**:
+   - Track API call latencies
+   - Monitor batch processing times
+   - Track retry rates
+
+2. **Error Tracking**:
+   - Log all network errors
+   - Track formatting failures
+   - Monitor callback errors
+
+3. **User Experience**:
+   - Track successful batch completions
+   - Monitor user cancellations
+   - Track progress update frequency
+
+## Next Steps
+
+1. **Monitoring**:
+   - Set up alerts for high retry rates
+   - Monitor memory usage during batch processing
+   - Track user session durations
+
+2. **Future Improvements**:
+   - Consider implementing rate limiting
+   - Add caching for frequently accessed data
+   - Optimize memory usage for large batches
+
+3. **Documentation**:
+   - Update API documentation
+   - Add troubleshooting guides
+   - Document retry policies
+
+## Additional Notes
+The comprehensive solution focusing on the architectural level has successfully addressed the core issues. The system is now more robust, reliable, and user-friendly. Continue monitoring for any new issues or areas for optimization.

@@ -45,47 +45,72 @@ class AIContentGenerator:
         
         # Phase 2: Relationship types for context-aware generation
         self.relationship_types = {
-            'different_aspects': '🔍 Different Aspects',
-            'different_angles': '📐 Different Angles', 
-            'series_continuation': '📚 Series Continuation',
-            'thematic_connection': '🔗 Thematic Connection',
-            'technical_deep_dive': '🔧 Technical Deep Dive',
-            'sequential_story': '📖 Sequential Story'
+            'integration_expansion': '🔗 Integration Expansion',
+            'implementation_evolution': '🔄 Implementation Evolution',
+            'system_enhancement': '⚡ System Enhancement',
+            'problem_solution_chain': '🎯 Problem-Solution Chain',
+            'feature_milestone': '🚀 Feature Milestone',
+            'deployment_experience': '📦 Deployment Experience'
         }
     
-    def _generate_content(self, system_prompt: str, user_prompt: str, temperature: float = 0.7, max_tokens: int = 2500) -> str:
+    def _generate_content(self, system_prompt: str, user_prompt: str, temperature: float = 0.7, max_tokens: int = 4000) -> str:
         """Unified content generation method that works with both OpenAI and Claude."""
-        try:
-            if self.provider == 'openai':
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    max_tokens=max_tokens,
-                    temperature=temperature
-                )
-                return response.choices[0].message.content
-            
-            elif self.provider == 'claude':
-                # Claude uses a different API format
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    system=system_prompt,
-                    messages=[
-                        {"role": "user", "content": user_prompt}
-                    ]
-                )
-                return response.content[0].text
-            
-            else:
-                raise ValueError(f"Unsupported provider: {self.provider}")
+        import time
+        import random
+        
+        # Enhanced retry logic for Claude overload errors
+        max_retries = 5
+        base_delay = 2
+        
+        for attempt in range(max_retries):
+            try:
+                if self.provider == 'openai':
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        max_tokens=max_tokens,
+                        temperature=temperature
+                    )
+                    return response.choices[0].message.content
                 
-        except Exception as e:
-            raise Exception(f"Error generating content with {self.provider}: {str(e)}")
+                elif self.provider == 'claude':
+                    # Claude uses a different API format
+                    response = self.client.messages.create(
+                        model=self.model,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        system=system_prompt,
+                        messages=[
+                            {"role": "user", "content": user_prompt}
+                        ]
+                    )
+                    return response.content[0].text
+                
+                else:
+                    raise ValueError(f"Unsupported provider: {self.provider}")
+                    
+            except Exception as e:
+                error_str = str(e)
+                
+                # Check if it's a Claude overload error
+                if "overloaded" in error_str.lower() or "529" in error_str:
+                    if attempt < max_retries - 1:
+                        # Exponential backoff with jitter
+                        delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                        print(f"Claude overloaded, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        raise Exception(f"Claude API overloaded after {max_retries} attempts. Please try again in a few minutes.")
+                else:
+                    # For other errors, fail immediately
+                    raise Exception(f"Error generating content with {self.provider}: {error_str}")
+        
+        # Should not reach here
+        raise Exception(f"Unexpected error after {max_retries} attempts")
     
     def get_model_info(self) -> Dict:
         """Get information about the current model configuration."""
@@ -134,6 +159,10 @@ class AIContentGenerator:
         Returns:
             Dict containing the generated post, tone used, and metadata
         """
+        # Default to business audience for better language simplification
+        if audience_type is None:
+            audience_type = 'business'
+            
         try:
             # Determine if this is a context-aware generation
             is_context_aware = session_context or previous_posts or relationship_type
@@ -152,7 +181,7 @@ class AIContentGenerator:
             
             # Generate content using OpenAI
             generated_content = self._generate_content(
-                system_prompt, full_prompt, temperature=0.7, max_tokens=2500
+                system_prompt, full_prompt, temperature=0.7, max_tokens=4000
             )
             
             # Parse the response
@@ -181,6 +210,10 @@ class AIContentGenerator:
         """Build the complete prompt for the AI."""
         prompt_parts = []
         
+        # Default to business audience for better language simplification
+        if audience_type is None:
+            audience_type = 'business'
+            
         if audience_type:
             audience_instructions = self._get_audience_instructions(audience_type)
             prompt_parts.append(audience_instructions)
@@ -202,6 +235,10 @@ class AIContentGenerator:
         """Build a context-aware prompt for multi-post generation."""
         prompt_parts = []
         
+        # Default to business audience for better language simplification
+        if audience_type is None:
+            audience_type = 'business'
+            
         if audience_type:
             audience_instructions = self._get_audience_instructions(audience_type)
             prompt_parts.append(audience_instructions)
@@ -215,13 +252,51 @@ class AIContentGenerator:
         if session_context:
             prompt_parts.append(f"SERIES CONTEXT:\n{session_context}")
         
-        # Add previous posts context
+        # Add previous posts context with detailed information
         if previous_posts:
             prompt_parts.append("PREVIOUS POSTS IN THIS SERIES:")
             for i, post in enumerate(previous_posts[-3:], 1):  # Show last 3 posts for context
                 prompt_parts.append(f"Post {i}: {post.get('tone_used', 'Unknown')} tone")
-                content_preview = post.get('content', '')[:200] + "..." if len(post.get('content', '')) > 200 else post.get('content', '')
-                prompt_parts.append(f"Content: {content_preview}")
+                
+                # Extract key details from previous posts
+                content = post.get('content', '')
+                if content:
+                    # Extract the main topics/themes
+                    sentences = content.split('.')[:5]  # First 5 sentences
+                    key_topics = []
+                    for sentence in sentences:
+                        if len(sentence.strip()) > 20:  # Skip very short sentences
+                            key_topics.append(sentence.strip())
+                    
+                    prompt_parts.append(f"Key Topics Covered: {'; '.join(key_topics[:3])}")
+                    
+                    # Extract specific details that can be referenced
+                    specific_details = []
+                    for sentence in content.split('.'):
+                        if any(word in sentence.lower() for word in ['built', 'created', 'implemented', 'solved', 'fixed', 'improved']):
+                            specific_details.append(sentence.strip())
+                    
+                    if specific_details:
+                        prompt_parts.append(f"Specific Details to Reference: {'; '.join(specific_details[:2])}")
+                    
+                    # Extract problems mentioned
+                    problems = []
+                    for sentence in content.split('.'):
+                        if any(word in sentence.lower() for word in ['problem', 'issue', 'challenge', 'frustrating', 'broken']):
+                            problems.append(sentence.strip())
+                    
+                    if problems:
+                        prompt_parts.append(f"Problems Mentioned: {'; '.join(problems[:2])}")
+                    
+                    # Extract results/benefits
+                    results = []
+                    for sentence in content.split('.'):
+                        if any(word in sentence.lower() for word in ['result', 'now', 'improvement', 'better', 'difference']):
+                            results.append(sentence.strip())
+                    
+                    if results:
+                        prompt_parts.append(f"Results/Benefits Shared: {'; '.join(results[:2])}")
+                
                 prompt_parts.append("")
         
         # Add tone preference if specified
@@ -234,6 +309,30 @@ class AIContentGenerator:
             if parent_post:
                 prompt_parts.append(f"REFERENCE POST: This post should naturally reference or build upon the previous post about {parent_post.get('tone_used', 'the topic')}. Use phrases like 'In my last post...', 'Building on what I shared...', or 'Following up on...'")
         
+        # Add mandatory referencing requirements for follow-up posts
+        if previous_posts:
+            prompt_parts.append("""
+MANDATORY FOLLOW-UP POST REQUIREMENTS:
+
+1. **MUST Reference Previous Posts**: Start your post by specifically referencing what you shared in your previous post. This is NOT optional.
+
+2. **Use Specific Details**: Don't just say "In my last post" - reference specific details, problems, or solutions you mentioned before.
+
+3. **Show Progression**: Demonstrate how this new content builds upon, extends, or relates to what you previously shared.
+
+4. **Natural Integration**: Weave the reference into your opening naturally, not as an afterthought.
+
+5. **Avoid Repetition**: Reference previous content but don't repeat it - use it as a foundation to share something new.
+
+Example Openings:
+- "In my last post, I shared how I solved [specific problem]. Now I want to dive into [new aspect]..."
+- "Building on the [specific solution] I posted about, I discovered something interesting..."
+- "After sharing about [specific improvement], I realized there's another layer to this..."
+- "Following up on my post about [specific feature], let me show you what happened when..."
+
+CRITICAL: This post must clearly connect to your previous post while offering completely new value.
+            """)
+        
         # Add content variation strategy
         if relationship_type:
             variation_strategy = self._get_content_variation_strategy(relationship_type)
@@ -245,6 +344,33 @@ class AIContentGenerator:
             if anti_repetition:
                 prompt_parts.append(anti_repetition)
         
+        # Add enhanced documentation format understanding
+        prompt_parts.append("""
+ENHANCED DOCUMENTATION FORMAT UNDERSTANDING:
+
+The markdown content follows an enhanced documentation structure with these sections:
+- **🎯 What I Built**: Core feature/solution description
+- **⚡ The Problem**: Specific pain points and challenges
+- **🔧 My Solution**: Implementation approach and key features
+- **🏆 The Impact/Result**: Measurable outcomes and benefits
+- **🏗️ Architecture & Design**: Technical implementation details
+- **💻 Code Implementation**: Specific technical choices and patterns
+- **🔗 Integration Points**: System connections and dependencies
+- **🎨 What Makes This Special**: Unique differentiators
+- **🔄 How This Connects to Previous Work**: Context and progression
+- **📊 Specific Use Cases & Scenarios**: Real-world applications
+- **💡 Key Lessons Learned**: Insights and discoveries
+- **🚧 Challenges & Solutions**: Problems overcome
+- **🔮 Future Implications**: What this enables next
+
+DYNAMIC CONTENT EXTRACTION BASED ON RELATIONSHIP TYPE:
+""")
+        
+        # Add relationship-specific content extraction guidance
+        content_extraction_guidance = self._get_content_extraction_guidance(relationship_type)
+        if content_extraction_guidance:
+            prompt_parts.append(content_extraction_guidance)
+        
         prompt_parts.append("MARKDOWN CONTENT TO TRANSFORM:")
         prompt_parts.append("---")
         prompt_parts.append(markdown_content)
@@ -255,45 +381,146 @@ class AIContentGenerator:
     def _get_relationship_instructions(self, relationship_type: str) -> str:
         """Get specific instructions for each relationship type."""
         instructions = {
-            'different_aspects': """
-RELATIONSHIP TYPE: Different Aspects
-Focus on a different section, feature, or component of the same project. 
-Avoid repeating what was already covered in previous posts.
-Highlight a new aspect that adds value to the overall story.
+            'integration_expansion': """
+RELATIONSHIP TYPE: Integration Expansion
+Reference your previous post and expand on integration or connection aspects.
+Build upon what you shared before about connecting systems or APIs.
+Use phrases like "In my last post about..." or "Building on what I shared about integrations..."
             """,
-            'different_angles': """
-RELATIONSHIP TYPE: Different Angles  
-Present the same information from a fresh perspective:
-- Technical vs. Business vs. Personal angle
-- Before/After vs. Process vs. Impact perspective
-- Developer vs. User vs. Business owner viewpoint
+            'implementation_evolution': """
+RELATIONSHIP TYPE: Implementation Evolution
+Reference your previous post and show how implementation evolved or improved.
+Build upon what you shared before about the building process.
+Use phrases like "After sharing about the initial build..." or "Following up on my implementation post..."
             """,
-            'series_continuation': """
-RELATIONSHIP TYPE: Series Continuation
-This is part of a sequential series (Part 1, 2, 3...).
-Reference the previous post naturally and build upon it.
-Use phrases like "In Part 1, I covered..." or "Now let's dive into..."
+            'system_enhancement': """
+RELATIONSHIP TYPE: System Enhancement
+Reference your previous post and focus on performance or capability improvements.
+Build upon what you shared before about system capabilities.
+Use phrases like "In my previous post, I mentioned..." or "Building on the system I shared..."
             """,
-            'thematic_connection': """
-RELATIONSHIP TYPE: Thematic Connection
-Connect to broader themes, philosophies, or principles from previous posts.
-Show how this project relates to overarching patterns or lessons.
-Use phrases like "This connects to what I've been exploring..." or "Another example of..."
+            'problem_solution_chain': """
+RELATIONSHIP TYPE: Problem-Solution Chain
+Reference your previous post and connect to related problems or solutions.
+Build upon problems or solutions you mentioned in your last post.
+Use phrases like "The issue I mentioned in my last post..." or "Following up on the problem I shared..."
             """,
-            'technical_deep_dive': """
-RELATIONSHIP TYPE: Technical Deep Dive
-Provide detailed technical explanation building on previous posts.
-Focus on implementation details, architecture, or technical decisions.
-Use phrases like "Here's how I actually built..." or "The technical side of..."
+            'feature_milestone': """
+RELATIONSHIP TYPE: Feature Milestone
+Reference your previous post and present this as the next milestone or completion.
+Build upon the feature work you shared before.
+Use phrases like "After completing what I shared..." or "The next milestone from my last post..."
             """,
-            'sequential_story': """
-RELATIONSHIP TYPE: Sequential Story
-Tell what happened next in the chronological story.
-Use narrative progression: "Then I...", "Next thing I knew...", "The plot twist was..."
-Maintain story flow and emotional continuity.
+            'deployment_experience': """
+RELATIONSHIP TYPE: Deployment Experience
+Reference your previous post and share real-world deployment or usage experience.
+Build upon what you shared before about building or testing.
+Use phrases like "After deploying what I shared..." or "In production, the system I posted about..."
             """
         }
         return instructions.get(relationship_type, "")
+    
+    def _get_content_extraction_guidance(self, relationship_type: str) -> str:
+        """Get specific guidance for extracting content based on relationship type."""
+        guidance = {
+            'integration_expansion': """
+FOR INTEGRATION EXPANSION POSTS:
+- Primary focus: **🔗 Integration Points** section
+- Secondary focus: **🏗️ Architecture & Design** section
+- Supporting details: **💻 Code Implementation** section
+- Reference: **🔄 How This Connects to Previous Work** section
+
+Extract and combine:
+- Specific APIs or services integrated
+- Data flow and connection patterns
+- System architecture decisions
+- Technical integration challenges solved
+- How this connects to or extends previous integrations
+
+Create content that shows how systems connect and communicate, focusing on the technical architecture and data flow aspects.
+            """,
+            'implementation_evolution': """
+FOR IMPLEMENTATION EVOLUTION POSTS:
+- Primary focus: **🔧 My Solution** section
+- Secondary focus: **💻 Code Implementation** section
+- Supporting details: **🎨 What Makes This Special** section
+- Reference: **🔄 How This Connects to Previous Work** section
+
+Extract and combine:
+- Evolution of implementation approach
+- Technical decisions and trade-offs made
+- Code patterns and architectural improvements
+- Lessons learned from previous implementations
+- How the approach refined over time
+
+Create content that shows the journey of implementation improvement, focusing on technical evolution and learning.
+            """,
+            'system_enhancement': """
+FOR SYSTEM ENHANCEMENT POSTS:
+- Primary focus: **🏆 The Impact/Result** section
+- Secondary focus: **🎨 What Makes This Special** section
+- Supporting details: **💻 Code Implementation** section
+- Reference: **🔄 How This Connects to Previous Work** section
+
+Extract and combine:
+- Specific performance improvements achieved
+- Scalability or capability enhancements
+- Measurable optimization results
+- Unique performance-focused innovations
+- How this builds upon previous system capabilities
+
+Create content that emphasizes improvements, optimizations, and enhanced capabilities with concrete metrics.
+            """,
+            'problem_solution_chain': """
+FOR PROBLEM-SOLUTION CHAIN POSTS:
+- Primary focus: **⚡ The Problem** section
+- Secondary focus: **🔧 My Solution** section
+- Supporting details: **🚧 Challenges & Solutions** section
+- Reference: **🔄 How This Connects to Previous Work** section
+
+Extract and combine:
+- Specific problems identified and addressed
+- Root cause analysis and investigation
+- Solution approach and methodology
+- Challenges overcome during implementation
+- How this problem relates to previous issues solved
+
+Create content that shows logical problem-solving progression, focusing on the analytical and solution-building process.
+            """,
+            'feature_milestone': """
+FOR FEATURE MILESTONE POSTS:
+- Primary focus: **🎯 What I Built** section
+- Secondary focus: **📊 Specific Use Cases & Scenarios** section
+- Supporting details: **🏆 The Impact/Result** section
+- Reference: **🔄 How This Connects to Previous Work** section
+
+Extract and combine:
+- Complete feature description and capabilities
+- Real-world use cases and applications
+- User impact and practical benefits
+- Feature completion and milestone achievement
+- How this feature builds upon previous work
+
+Create content that celebrates feature completion and demonstrates practical value and real-world impact.
+            """,
+            'deployment_experience': """
+FOR DEPLOYMENT EXPERIENCE POSTS:
+- Primary focus: **🔮 Future Implications** section
+- Secondary focus: **📊 Specific Use Cases & Scenarios** section
+- Supporting details: **💡 Key Lessons Learned** section
+- Reference: **🔄 How This Connects to Previous Work** section
+
+Extract and combine:
+- Real-world deployment insights and outcomes
+- User feedback and usage patterns
+- Operational lessons learned
+- Production performance and reliability
+- Future possibilities enabled by deployment
+
+Create content that shares real-world deployment insights, user feedback, and operational learning experiences.
+            """
+        }
+        return guidance.get(relationship_type, "")
     
     def _get_audience_instructions(self, audience_type: str) -> str:
         """Get audience-specific instructions."""
@@ -306,21 +533,25 @@ Maintain story flow and emotional continuity.
     def _get_business_audience_instructions(self) -> str:
         """Get specific instructions for business audience."""
         return """
-AUDIENCE: Business Owner/General (like busy shop owners, service providers)
+AUDIENCE: Business Owner/General (people who might be interested in automation and tech solutions)
 
 Content Guidelines:
-- Use simple, clear language
-- Focus on business impact: time saved, money made, problems solved
-- Use relatable examples (running a shop, managing customers, handling inventory)
-- Avoid technical jargon - explain in everyday terms
-- Emphasize practical benefits and real-world results
-- Make it sound like you're talking to a friend who owns a business
+- Write from YOUR perspective about YOUR own projects
+- Share what YOU built for YOUR own use, not for others
+- Use simple, clear language without technical jargon
+- Focus on what the feature does and why YOU needed it
+- Mention the practical benefits YOU get from it
+- Keep it conversational but professional
+- Avoid excessive examples or analogies
 
-Examples of good language:
-- "This saves me 3 hours every week"
-- "My customers are happier because..."
-- "I used to spend all day on paperwork, now..."
-- "It's like having an assistant that never sleeps"
+Language Style:
+- "I built this feature to help me..."
+- "This saves me time because..."
+- "I needed something that could..."
+- "Now I can..."
+- "The result is..."
+
+Remember: You're sharing YOUR development journey and achievements, not selling services to others.
 """
 
     def _get_technical_audience_instructions(self) -> str:
@@ -346,63 +577,78 @@ Examples of good language:
         """Get content variation strategy based on relationship type."""
         # Base anti-repetition instructions
         base_instructions = """
-CONTENT VARIATION STRATEGY:
-- Avoid repeating exact phrases from previous posts
-- Use different examples and analogies
-- Vary sentence structure and opening statements
-- Introduce new perspectives or angles
-- Reference different aspects of the technical implementation
+ENHANCED CONTENT VARIATION STRATEGY:
+- Create FUNDAMENTALLY different content, not just rephrased versions
+- Use completely different narrative structures and approaches
+- Introduce new technical details, business benefits, or use cases
+- Focus on aspects that haven't been covered in previous posts
+- Use different examples, analogies, and metaphors
+- Vary writing style: problem-focused vs solution-focused vs result-focused
 """
         
         # Relationship-specific variation strategies
         variation_strategies = {
-            'Different Aspects': base_instructions + """
-- Focus on completely different features or components
-- Highlight different user benefits or use cases
-- Explore different technical challenges overcome
-- Discuss different development phases or stages
+            'Integration Expansion': base_instructions + """
+INTEGRATION EXPANSION FOCUS:
+- Reference your previous post and expand on API connections or data flows
+- Discuss how systems connect differently than what you shared before
+- Focus on integration challenges or solutions not mentioned in previous post
+- Explore different connection patterns or communication methods
+- Show how this feature integrates with other systems you've built
 """,
             
-            'Different Angles': base_instructions + """
-- Change perspective: technical vs business vs user experience
-- Vary the narrative voice: builder vs user vs observer
-- Focus on different emotional aspects: excitement vs challenge vs pride
-- Alternate between problem-focused and solution-focused narratives
+            'Implementation Evolution': base_instructions + """
+IMPLEMENTATION EVOLUTION FOCUS:
+- Reference your previous post and show how the approach evolved
+- Discuss refinements or optimizations made since your last post
+- Focus on architectural improvements or code changes
+- Show lessons learned from the implementation you shared before
+- Reveal different challenges encountered after your initial post
 """,
             
-            'Series Continuation': base_instructions + """
-- Build chronologically on previous content
-- Introduce new developments or improvements
-- Show progression and evolution of ideas
-- Reference 'what happened next' or 'building further'
-- Avoid repeating the same accomplishments
+            'System Enhancement': base_instructions + """
+SYSTEM ENHANCEMENT FOCUS:
+- Reference your previous post and focus on performance improvements
+- Discuss scalability or capability enhancements since your last post
+- Show measurable improvements or optimizations made
+- Focus on system upgrades or enhanced functionality
+- Reveal performance insights discovered after your previous post
 """,
             
-            'Technical Deep Dive': base_instructions + """
-- Explore different technical layers (frontend, backend, database)
-- Focus on different programming concepts or patterns
-- Discuss different tools or technologies used
-- Vary between high-level architecture and implementation details
+            'Problem-Solution Chain': base_instructions + """
+PROBLEM-SOLUTION CHAIN FOCUS:
+- Reference problems or solutions mentioned in your previous post
+- Connect this new solution to issues you identified before
+- Show logical progression from your previous post's challenges
+- Focus on related problems that emerged from your last solution
+- Reveal solutions that address concerns raised in your previous post
 """,
             
-            'Thematic Connection': base_instructions + """
-- Connect through underlying principles rather than surface details
-- Explore different philosophical or strategic aspects
-- Draw different life or business lessons
-- Use different metaphors and analogies
+            'Feature Milestone': base_instructions + """
+FEATURE MILESTONE FOCUS:
+- Reference your previous post and present this as the next milestone
+- Show completion or advancement from what you shared before
+- Focus on capabilities enabled by completing your previous feature
+- Discuss what this milestone makes possible beyond your last post
+- Reveal outcomes or results from implementing your previous feature
 """,
             
-            'Sequential Story': base_instructions + """
-- Focus on different timeline segments
-- Introduce new characters or stakeholders
-- Show different stages of problem-solving
-- Highlight different obstacles and breakthroughs
+            'Deployment Experience': base_instructions + """
+DEPLOYMENT EXPERIENCE FOCUS:
+- Reference your previous post and share real-world deployment insights
+- Discuss production experience with what you shared before
+- Focus on user feedback or operational insights from your previous feature
+- Show how the deployed system performs differently than expected
+- Reveal lessons learned from using the system you posted about
 """,
             
             'AI Decide': base_instructions + """
-- Let AI determine the best variation approach
-- Combine multiple strategies for maximum variety
-- Ensure each post offers unique value and perspective
+AI DECIDE FOCUS:
+- Let AI determine the most different and complementary approach
+- Combine multiple strategies for maximum content variation
+- Ensure the new post offers completely unique value and perspective
+- Focus on the most unexplored aspects of the project or topic
+- Create content that fills gaps left by previous posts
 """
         }
         
@@ -410,31 +656,138 @@ CONTENT VARIATION STRATEGY:
     
     def _add_anti_repetition_context(self, markdown_content: str, previous_posts: List[Dict], 
                                    relationship_type: str) -> str:
-        """Add context to prevent content repetition."""
+        """Add enhanced context to prevent content repetition."""
         if not previous_posts:
             return ""
         
-        # Extract key phrases and topics from previous posts
+        # Extract comprehensive elements from previous posts
         previous_content = []
+        previous_openings = []
+        previous_examples = []
+        previous_conclusions = []
+        previous_metaphors = []
+        previous_questions = []
+        previous_problems = []
+        previous_solutions = []
+        previous_benefits = []
+        
         for post in previous_posts[-3:]:  # Look at last 3 posts
             content = post.get('content', '')
             if content:
-                # Extract first sentences as key phrases
-                sentences = content.split('.')[:3]
-                previous_content.extend(sentences)
+                # Split into sentences and paragraphs
+                sentences = content.split('.')
+                paragraphs = content.split('\n\n')
+                
+                # Get opening sentences (first 3 sentences)
+                if len(sentences) >= 3:
+                    opening = '. '.join(sentences[:3])
+                    previous_openings.append(opening.strip())
+                
+                # Get conclusions (last 3 sentences)
+                if len(sentences) >= 3:
+                    conclusion = '. '.join(sentences[-3:])
+                    previous_conclusions.append(conclusion.strip())
+                
+                # Extract examples and analogies
+                for sentence in sentences:
+                    if any(word in sentence.lower() for word in ['example', 'like', 'such as', 'instance', 'similar to', 'it\'s like']):
+                        previous_examples.append(sentence.strip())
+                    if any(word in sentence.lower() for word in ['like having', 'imagine', 'think of', 'picture']):
+                        previous_metaphors.append(sentence.strip())
+                
+                # Extract questions
+                for sentence in sentences:
+                    if sentence.strip().endswith('?'):
+                        previous_questions.append(sentence.strip())
+                
+                # Extract problem statements
+                for sentence in sentences:
+                    if any(word in sentence.lower() for word in ['problem', 'issue', 'challenge', 'frustrating', 'broken']):
+                        previous_problems.append(sentence.strip())
+                
+                # Extract solution statements
+                for sentence in sentences:
+                    if any(word in sentence.lower() for word in ['solution', 'fixed', 'solved', 'built', 'created']):
+                        previous_solutions.append(sentence.strip())
+                
+                # Extract benefit statements
+                for sentence in sentences:
+                    if any(word in sentence.lower() for word in ['now', 'result', 'benefit', 'improvement', 'better']):
+                        previous_benefits.append(sentence.strip())
+                
+                # Extract key phrases (first 8 sentences for general context)
+                previous_content.extend(sentences[:8])
         
-        if not previous_content:
+        if not any([previous_content, previous_openings, previous_examples, previous_metaphors, previous_questions, previous_problems, previous_solutions, previous_benefits]):
             return ""
         
-        # Create anti-repetition instructions
+        # Create enhanced anti-repetition instructions
         anti_repetition = f"""
-ANTI-REPETITION REQUIREMENTS:
-- Previous posts used these opening approaches: {'; '.join(previous_content[:5])}
-- Do NOT start with similar phrases or structures
-- Introduce completely new examples and analogies
-- Use different vocabulary and sentence patterns
-- Bring fresh perspective while maintaining series coherence
-- Focus on aspects NOT covered in previous posts
+STRICT ANTI-REPETITION REQUIREMENTS:
+
+**COMPLETELY AVOID THESE PREVIOUS OPENINGS:**
+{'; '.join(previous_openings[:3]) if previous_openings else 'None'}
+
+**NEVER REPEAT THESE EXAMPLES/ANALOGIES:**
+{'; '.join(previous_examples[:3]) if previous_examples else 'None'}
+
+**AVOID THESE METAPHORS:**
+{'; '.join(previous_metaphors[:3]) if previous_metaphors else 'None'}
+
+**DON'T REPEAT THESE QUESTIONS:**
+{'; '.join(previous_questions[:3]) if previous_questions else 'None'}
+
+**AVOID THESE PROBLEM STATEMENTS:**
+{'; '.join(previous_problems[:3]) if previous_problems else 'None'}
+
+**DON'T REPEAT THESE SOLUTION APPROACHES:**
+{'; '.join(previous_solutions[:3]) if previous_solutions else 'None'}
+
+**AVOID THESE BENEFIT STATEMENTS:**
+{'; '.join(previous_benefits[:3]) if previous_benefits else 'None'}
+
+**FORBIDDEN PHRASES AND PATTERNS:**
+{'; '.join([content.strip() for content in previous_content[:8]]) if previous_content else 'None'}
+
+**MANDATORY VARIATION RULES:**
+1. Use COMPLETELY different opening sentences and hooks - NO SIMILAR PATTERNS
+2. Introduce ENTIRELY NEW examples, analogies, and metaphors  
+3. Focus on DIFFERENT aspects/features/benefits not previously mentioned
+4. Use DIFFERENT vocabulary, sentence structures, and writing patterns
+5. Provide NEW insights, perspectives, or angles not covered before
+6. Reference different technical implementations or business impacts
+7. DO NOT repeat the same accomplishments, features, or outcomes
+8. DO NOT use similar success metrics, results, or comparisons
+9. Start with a completely different narrative approach and voice
+10. If building on previous posts, ADD NEW VALUE, don't repeat existing value
+11. Use different types of questions than previously asked
+12. Employ different storytelling techniques and structures
+13. Focus on different emotions or motivations
+14. Use completely different examples from different industries/contexts
+15. Avoid similar conclusions or calls-to-action
+
+**FOLLOW-UP POST REQUIREMENTS:**
+- Reference your own previously generated and approved posts naturally
+- Build upon what YOU shared in your previous post, not assumed prior knowledge
+- Use phrases like "In my last post, I shared..." or "Building on what I posted about..."
+- Connect this content to the specific things you mentioned in your previous post
+- Show progression from your previous post's content
+- Reference specific details from your previous post to create genuine continuity
+
+**CONTENT FOCUS STRATEGY - FIND COMPLETELY NEW ANGLES:**
+Instead of repeating what was already shared about this project, focus on:
+- Different technical components or modules not previously discussed
+- Alternative use cases, applications, or scenarios
+- Deeper technical details or architectural decisions
+- Different user perspectives, stakeholder benefits, or business impacts
+- Related insights, lessons learned, or unexpected discoveries
+- Future developments, improvements, or planned enhancements
+- Broader industry context, trends, or implications
+- Different problem-solving approaches or methodologies
+- Unique challenges encountered or overcome
+- Different success metrics or measurable outcomes
+- Alternative implementation strategies or technical choices
+- Different user feedback or real-world usage patterns
 """
         
         return anti_repetition
@@ -456,18 +809,18 @@ ANTI-REPETITION REQUIREMENTS:
 - You are creating posts as part of a series for business owners
 - Use the session context and previous posts to create natural continuity
 - Reference previous posts naturally: "In my last post...", "Building on what I shared..."
-- Ensure each post adds new business value while maintaining series coherence
+- Ensure each post adds new personal value while maintaining series coherence
 - Keep the business-friendly language consistent across all posts in the series
-- Focus on different business aspects or benefits in each post to avoid repetition
+- Focus on different practical benefits or use cases in each post to avoid repetition
 - Never mention time frames or duration across the series
-- Present each milestone as a completed achievement that adds business value
+- Present each feature as a completed achievement that adds personal value
 
 **CONTENT PROCESSING FOR SERIES:**
-- Each markdown file represents a completed development milestone
-- Extract unique business value from each milestone
+- Each markdown file represents a completed feature implementation
+- Extract unique practical value from each feature
 - Ignore any file naming patterns or dates
-- Focus on different business benefits or use cases
-- Present work as finished accomplishments that solve business problems
+- Focus on different practical benefits or use cases of each feature
+- Present features as finished accomplishments that solve specific personal problems
 
 """
         
@@ -486,11 +839,27 @@ ANTI-REPETITION REQUIREMENTS:
         return """You are a smart, helpful copywriter who turns project ideas and build summaries into engaging social media posts.
 
 **CRITICAL UNDERSTANDING:**
-- You are processing developer journal entries from `content/dev_journal/`
-- Files follow the format: `milestone-name-001.md` (sequential numbering, no dates)
-- Content describes development work but contains NO TIME REFERENCES
-- Focus on the Problem → Solution → Result narrative, not duration
-- Content represents completed work, not ongoing projects
+- You are processing enhanced development documentation from individual .mdc files
+- Each file follows a structured format with specific sections (🎯 What I Built, ⚡ The Problem, etc.)
+- Files contain rich technical and contextual information across multiple sections
+- Focus on extracting and combining information from relevant sections based on the relationship type
+- These are feature implementations with comprehensive documentation for varied content creation
+- Content represents completed features with detailed context for multiple content angles
+
+**CRITICAL PERSONAL PROJECT PERSPECTIVE:**
+These are PERSONAL features that I built to solve MY OWN problems. I am sharing specific features and improvements I implemented for myself, not creating services for others.
+
+✅ CORRECT PERSPECTIVE:
+- "I built this tool to solve my own problem with..."
+- "I needed a way to handle my own..."
+- "This helps me manage my own..."
+- "I created this for my own use because..."
+
+❌ INCORRECT PERSPECTIVE:
+- "I built this for farmers to..."
+- "This helps farmers with..."
+- "Farmers can now..."
+- "This system serves farmers by..."
 
 **CRITICAL VOICE ENFORCEMENT:**
 You are writing as a solo developer sharing personal projects. Use ONLY first-person language:
@@ -511,14 +880,22 @@ You are writing as a solo developer sharing personal projects. Use ONLY first-pe
 - Never: "recently", "yesterday", "last month"
 - Never: "over the weekend", "in the evening"
 
-This is YOUR personal project that YOU built. Share it authentically in first person without time frames.
+This is YOUR personal feature update that YOU worked on YOURSELF. Share it authentically in first person without time frames.
+
+**CRITICAL FEATURE SHARING APPROACH:**
+- Focus on what the feature does and why it's useful
+- Share the specific improvement or capability you built
+- Explain the problem it solves and the benefits it provides
+- Avoid making it sound like you're documenting an entire project journey
+- Present it as "I built this feature..." not "I'm working on this project..."
 
 **Content Processing Instructions:**
-- The markdown content represents a completed development milestone
-- Extract the core problem, solution, and result
+- The markdown content represents a completed feature implementation with rich documentation
+- Extract information from specific sections based on relationship type and content focus
+- Combine information from multiple sections to create unique content angles
 - Ignore any file naming patterns or dates
-- Focus on the technical achievement and its impact
-- Present the work as a finished accomplishment"""
+- Focus on the relevant aspects (technical, business, user impact) as guided by relationship type
+- Present the feature as a finished accomplishment with specific details from appropriate sections"""
 
     def _get_technical_system_prompt(self) -> str:
         """System prompt for a technical audience."""
@@ -540,11 +917,27 @@ You are writing for a technical audience of developers and engineers.
         return """You are a helpful copywriter who turns project notes into clear, practical Facebook posts for small business owners.
 
 **CRITICAL UNDERSTANDING:**
-- You are processing developer journal entries from `content/dev_journal/`
-- Files follow the format: `milestone-name-001.md` (sequential numbering, no dates)
-- Content describes development work but contains NO TIME REFERENCES
-- Focus on the Problem → Solution → Result narrative, not duration
-- Content represents completed work, not ongoing projects
+- You are processing enhanced development documentation from individual .mdc files
+- Each file follows a structured format with specific sections (🎯 What I Built, ⚡ The Problem, etc.)
+- Files contain rich technical and contextual information across multiple sections
+- Focus on extracting and combining information from relevant sections based on the relationship type
+- These are feature implementations with comprehensive documentation for varied content creation
+- Content represents completed features with detailed context for multiple content angles
+
+**CRITICAL PERSONAL PROJECT PERSPECTIVE:**
+These are PERSONAL features that I built to solve MY OWN problems. I am sharing specific features and improvements I implemented for myself, not creating services for others.
+
+✅ CORRECT PERSPECTIVE:
+- "I built this tool to solve my own problem with..."
+- "I needed a way to handle my own..."
+- "This helps me manage my own..."
+- "I created this for my own use because..."
+
+❌ INCORRECT PERSPECTIVE:
+- "I built this for farmers to..."
+- "This helps farmers with..."
+- "Farmers can now..."
+- "This system serves farmers by..."
 
 **CRITICAL VOICE ENFORCEMENT:**
 You are writing as a solo developer sharing personal projects. Use ONLY first-person language:
@@ -565,28 +958,77 @@ You are writing as a solo developer sharing personal projects. Use ONLY first-pe
 - Never: "recently", "yesterday", "last month"
 - Never: "over the weekend", "in the evening"
 
-This is YOUR personal project that YOU built. Share it authentically in first person without time frames.
+This is YOUR personal feature that YOU built for YOURSELF. Share it authentically in first person without time frames.
+
+**CRITICAL FEATURE SHARING APPROACH:**
+- Focus on what the feature does and why it's useful
+- Share the specific improvement or capability you built
+- Explain the problem it solves and the benefits it provides
+- Avoid making it sound like you're documenting an entire project journey
+- Present it as "I built this feature..." not "I'm working on this project..."
 
 ---
 
-Your audience is busy business owners who want practical solutions. They may not be highly technical, but they understand business challenges. Your job is to explain solutions in clear, everyday language.
+**CRITICAL LANGUAGE REQUIREMENT:**
+Your audience includes busy business owners who may not be technical. Write at a 15-year-old reading level using ONLY everyday language that anyone can understand.
+
+**MANDATORY LANGUAGE SIMPLIFICATION:**
+Replace ALL technical terms with simple, everyday words:
+- "API integration" → "connecting different apps"
+- "database" → "digital filing cabinet" or "stored information"
+- "automated workflow" → "tasks that run by themselves"
+- "authentication" → "login system" or "security check"
+- "backend" → "behind-the-scenes part"
+- "frontend" → "the part users see"
+- "cloud hosting" → "storing files online"
+- "algorithm" → "step-by-step process"
+- "optimization" → "making it work better"
+- "deployment" → "putting it online"
+- "server" → "computer that stores the website"
+- "repository" → "project folder"
+- "framework" → "pre-built tools"
+- "library" → "collection of pre-written code"
+- "configuration" → "settings"
+- "implementation" → "building it"
+- "functionality" → "what it does"
+- "integration" → "connecting"
+- "interface" → "how you interact with it"
+- "module" → "part of the system"
+- "protocol" → "set of rules"
+- "infrastructure" → "the foundation"
+- "scalability" → "ability to grow"
+- "migration" → "moving from one system to another"
+- "validation" → "checking"
+- "synchronization" → "keeping things updated"
+- "cache" → "temporary storage"
+- "webhook" → "automatic notification"
+- "endpoint" → "connection point"
+
+**ADDITIONAL SIMPLIFICATION RULES:**
+- Use "app" instead of "application" or "software"
+- Use "code" instead of "codebase" or "source code"
+- Use "fix" instead of "debug" or "troubleshoot"
+- Use "test" instead of "validate" or "verify"
+- Use "update" instead of "refactor" or "optimize"
+- Use "connect" instead of "integrate" or "sync"
+- Use "store" instead of "persist" or "cache"
+- Use "send" instead of "transmit" or "deploy"
+- Use "check" instead of "validate" or "authenticate"
+- Use "run" instead of "execute" or "process"
 
 They want to know:
-- What problem this solves  
-- How it works (in simple terms)  
-- Why it matters for their business  
+- What problem this solves (in simple terms)
+- How it works (explained like talking to a friend)
+- Why it matters for their business
 - What realistic results they can expect
 
 ---
 
 ### ✍️ Your task:
 
-Generate a conversational Facebook post from the content provided. Write it naturally, like you're explaining something useful to a business colleague.
+Generate a conversational Facebook post from the content provided. Write it naturally, like you're explaining something useful to a friend who runs a small business but isn't tech-savvy.
 
-**Use clear, everyday language.** Avoid technical jargon and replace complex terms with simple ones:
-- Instead of "API integration" → say "connected systems"
-- Instead of "database" → say "stored information"
-- Instead of "automated workflow" → say "handles tasks automatically"
+**Use ONLY simple, everyday language that a 15-year-old would understand.**
 
 ---
 
@@ -606,18 +1048,19 @@ Generate a conversational Facebook post from the content provided. Write it natu
 
 **IMPORTANT LENGTH REQUIREMENT:**
 Your post must be between 400-600 words to maximize Facebook engagement. This is a firm target, not a suggestion. If your first draft is too short, expand on:
-- More detailed examples
+- More detailed examples (in simple terms)
 - Additional context about the problem
-- Specific implementation details (in simple terms)
+- Specific implementation details (explained simply)
 - More comprehensive results or impact
 - Personal insights and lessons learned
 
 **Content Processing Instructions:**
-- The markdown content represents a completed development milestone
-- Extract the core problem, solution, and result
+- The markdown content represents a completed feature implementation with rich documentation
+- Extract information from specific sections based on relationship type and content focus
+- Combine information from multiple sections to create unique content angles
 - Ignore any file naming patterns or dates
-- Focus on the technical achievement and its impact
-- Present the work as a finished accomplishment
+- Focus on the relevant aspects (technical, business, user impact) as guided by relationship type
+- Present the feature as a finished accomplishment with specific details from appropriate sections
 
 ---
 
@@ -637,7 +1080,7 @@ TONE: [chosen tone name]
 POST: [Facebook post content in clear, conversational language - aim for 400-600 words, no time references]
 REASON: [brief explanation of tone choice and audience fit]
 
-**IMPORTANT:** Keep the language natural and conversational. Avoid hype, excessive enthusiasm, or sales-like language. Focus on practical value and honest communication. Write as if YOU built this project yourself without mentioning when or how long it took."""
+**IMPORTANT:** Keep the language natural and conversational. Avoid hype, excessive enthusiasm, or sales-like language. Focus on practical value and honest communication. Write as if YOU built this project yourself without mentioning when or how long it took. Remember: if a 15-year-old can't understand it, rewrite it in simpler terms."""
 
     def _parse_ai_response(self, response: str) -> Dict:
         """Parse the AI response to extract tone, post content, and reason."""
@@ -749,22 +1192,28 @@ REASON: [brief explanation of tone choice and audience fit]
     
     def regenerate_post(self, markdown_content: str, feedback: str = "", tone_preference: Optional[str] = None,
                        session_context: Optional[str] = None, previous_posts: Optional[List[Dict]] = None,
-                       relationship_type: Optional[str] = None, parent_post_id: Optional[str] = None) -> Dict:
+                       relationship_type: Optional[str] = None, parent_post_id: Optional[str] = None,
+                       audience_type: Optional[str] = None) -> Dict:
         """
-        Regenerate a post with user feedback and context awareness.
+        Regenerate a Facebook post with feedback and context awareness.
         
         Args:
-            markdown_content: Original markdown content
-            feedback: User feedback on the previous version
-            tone_preference: Specific tone to use for regeneration
+            markdown_content: The markdown content to transform
+            feedback: Feedback to consider for regeneration
+            tone_preference: Optional tone preference from user
             session_context: Context from previous posts in the series
             previous_posts: List of previous posts in the series
             relationship_type: How this post relates to previous posts
             parent_post_id: ID of the parent post to reference
+            audience_type: The target audience ('business' or 'technical')
             
         Returns:
-            Dict containing the regenerated post and metadata
+            Dict containing the regenerated post, tone used, and metadata
         """
+        # Default to business audience for better language simplification
+        if audience_type is None:
+            audience_type = 'business'
+            
         try:
             # Determine if this is a context-aware regeneration
             is_context_aware = session_context or previous_posts or relationship_type
@@ -773,16 +1222,16 @@ REASON: [brief explanation of tone choice and audience fit]
                 # Build context-aware regeneration prompt
                 regeneration_prompt = self._build_context_aware_regeneration_prompt(
                     markdown_content, feedback, tone_preference, session_context, 
-                    previous_posts, relationship_type, parent_post_id
+                    previous_posts, relationship_type, parent_post_id, audience_type
                 )
-                system_prompt = self._get_context_aware_system_prompt()
+                system_prompt = self._get_context_aware_system_prompt(audience_type)
             else:
                 # Use original regeneration prompt
-                regeneration_prompt = self._build_regeneration_prompt(markdown_content, feedback, tone_preference)
-                system_prompt = self.prompt_template
+                regeneration_prompt = self._build_regeneration_prompt(markdown_content, feedback, tone_preference, audience_type)
+                system_prompt = self._get_system_prompt(audience_type)
             
             generated_content = self._generate_content(
-                system_prompt, regeneration_prompt, temperature=0.8, max_tokens=2500
+                system_prompt, regeneration_prompt, temperature=0.8, max_tokens=4000
             )
             
             parsed_response = self._parse_ai_response(generated_content)
@@ -798,7 +1247,8 @@ REASON: [brief explanation of tone choice and audience fit]
                 'is_regeneration': True,
                 'is_context_aware': is_context_aware,
                 'relationship_type': relationship_type,
-                'parent_post_id': parent_post_id
+                'parent_post_id': parent_post_id,
+                'audience_type': audience_type
             }
             
             return result
@@ -806,9 +1256,17 @@ REASON: [brief explanation of tone choice and audience fit]
         except Exception as e:
             raise Exception(f"Error regenerating Facebook post: {str(e)}")
     
-    def _build_regeneration_prompt(self, markdown_content: str, feedback: str, tone_preference: Optional[str] = None) -> str:
+    def _build_regeneration_prompt(self, markdown_content: str, feedback: str, tone_preference: Optional[str] = None, audience_type: Optional[str] = None) -> str:
         """Build prompt for regeneration with feedback."""
         prompt_parts = []
+        
+        # Default to business audience for better language simplification
+        if audience_type is None:
+            audience_type = 'business'
+            
+        if audience_type:
+            audience_instructions = self._get_audience_instructions(audience_type)
+            prompt_parts.append(audience_instructions)
         
         prompt_parts.append("Please regenerate the Facebook post with the following feedback in mind:")
         prompt_parts.append(f"FEEDBACK: {feedback}")
@@ -826,9 +1284,17 @@ REASON: [brief explanation of tone choice and audience fit]
     def _build_context_aware_regeneration_prompt(self, markdown_content: str, feedback: str, 
                                                tone_preference: Optional[str], session_context: Optional[str],
                                                previous_posts: Optional[List[Dict]], relationship_type: Optional[str],
-                                               parent_post_id: Optional[str]) -> str:
+                                               parent_post_id: Optional[str], audience_type: Optional[str] = None) -> str:
         """Build context-aware regeneration prompt."""
         prompt_parts = []
+        
+        # Default to business audience for better language simplification
+        if audience_type is None:
+            audience_type = 'business'
+            
+        if audience_type:
+            audience_instructions = self._get_audience_instructions(audience_type)
+            prompt_parts.append(audience_instructions)
         
         prompt_parts.append("Please regenerate the Facebook post with the following feedback in mind:")
         prompt_parts.append(f"FEEDBACK: {feedback}")
@@ -974,16 +1440,23 @@ REASON: [brief explanation of tone choice and audience fit]
         """Validate if relationship type is supported."""
         return relationship_type in self.relationship_types
 
-    def generate_continuation_post(self, previous_post_text: str, add_chichewa_humor: bool = False) -> Dict:
+    def generate_continuation_post(self, previous_post_text: str, add_chichewa_humor: bool = False, audience_type: Optional[str] = None) -> Dict:
         """
         Generate a follow-up Facebook post based on the text of a previous post.
         """
+        # Default to business audience for better language simplification
+        if audience_type is None:
+            audience_type = 'business'
+            
         try:
-            system_prompt = self._get_system_prompt()
-            full_prompt = self._build_continuation_prompt(previous_post_text)
+            # Use the same system prompt as regular posts for consistent format
+            system_prompt = self._get_system_prompt(audience_type)
+            
+            # Build a continuation prompt that maintains the same format
+            full_prompt = self._build_continuation_prompt(previous_post_text, audience_type)
 
             generated_content = self._generate_content(
-                system_prompt, full_prompt, temperature=0.7, max_tokens=2500
+                system_prompt, full_prompt, temperature=0.7, max_tokens=4000
             )
 
             parsed_response = self._parse_ai_response(generated_content)
@@ -998,6 +1471,7 @@ REASON: [brief explanation of tone choice and audience fit]
                 'is_context_aware': True,
                 'relationship_type': 'continuation',
                 'parent_post_id': None,
+                'audience_type': audience_type
             }
 
             # Add Chichewa humor if requested
@@ -1008,26 +1482,42 @@ REASON: [brief explanation of tone choice and audience fit]
         except Exception as e:
             raise Exception(f"Error generating continuation post: {str(e)}")
 
-    def _build_continuation_prompt(self, previous_post_text: str) -> str:
+    def _build_continuation_prompt(self, previous_post_text: str, audience_type: Optional[str] = None) -> str:
         """Build the prompt for generating a continuation post."""
         prompt_parts = []
+        
+        # Default to business audience for better language simplification
+        if audience_type is None:
+            audience_type = 'business'
+            
+        # Add audience instructions for consistency
+        if audience_type:
+            audience_instructions = self._get_audience_instructions(audience_type)
+            prompt_parts.append(audience_instructions)
 
         prompt_parts.append(
-            "You are a copywriter tasked with writing a follow-up to an existing Facebook post. "
-            "Your goal is to create a new post that feels like a natural continuation of the story or topic."
+            "You are creating a follow-up Facebook post that builds naturally on a previous post. "
+            "Your goal is to create a new, original post that feels like the next chapter in the story."
         )
+        
         prompt_parts.append(
-            "INSTRUCTIONS:\\n"
-            "1. **Analyze the Previous Post**: Carefully read the post provided below to understand its topic, tone, and style.\\n"
-            "2. **Generate a Follow-Up**: Write a new, original post that builds on the previous one. Do NOT simply summarize or repeat it.\\n"
-            "3. **Add New Value**: Introduce a new perspective, a deeper dive, a lesson learned, or the next step in the process.\\n"
-            "4. **Use Transition Phrases**: Make the connection clear with phrases like 'In my last post...', 'Building on that idea...', 'To continue where I left off...', etc.\\n"
-            "5. **Maintain Consistency**: Match the tone and voice of the previous post to ensure the series feels cohesive.\\n"
-            "6. **Format Your Response**: Structure your entire output with the following tags: `[POST]`, `[TONE]`, and `[REASON]`."
+            "FOLLOW-UP POST INSTRUCTIONS:\n"
+            "1. **Analyze the Previous Post**: Understand the topic, tone, and style of the previous post.\n"
+            "2. **Generate a Natural Follow-Up**: Write a new post that builds on the previous one - do NOT summarize or repeat it.\n"
+            "3. **Add New Value**: Introduce a new perspective, deeper insight, lesson learned, or next step.\n"
+            "4. **Use Connection Phrases**: Reference the previous post naturally with phrases like:\n"
+            "   - 'In my last post...'\n"
+            "   - 'Building on what I shared...'\n"
+            "   - 'Following up on...'\n"
+            "   - 'After sharing about...'\n"
+            "5. **Maintain Consistency**: Match the tone and voice for series coherence.\n"
+            "6. **Keep Same Format**: Use the same 400-600 word structure as the original post.\n"
+            "7. **Same Language Level**: Use the same simple, clear language as the previous post."
         )
-        prompt_parts.append("Here is the previous post to continue from:")
+        
+        prompt_parts.append("PREVIOUS POST TO BUILD ON:")
         prompt_parts.append("---")
         prompt_parts.append(previous_post_text)
         prompt_parts.append("---")
         
-        return "\\n\\n".join(prompt_parts) 
+        return "\n\n".join(prompt_parts) 

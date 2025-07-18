@@ -4,6 +4,21 @@ This document outlines the best practices for creating markdown content to ensur
 
 **Core Principle:** The AI is trained to think in terms of **Problem → Solution → Result**. Your markdown file should be a detailed "developer's journal" entry that tells a clear story about a specific piece of work. The more structured and explicit you are, the better the AI can translate your technical achievements into compelling content for different audiences.
 
+**CRITICAL PERSONAL PROJECT PERSPECTIVE:**
+These are PERSONAL projects that you built to solve YOUR OWN problems. You are sharing your journey of building tools for yourself, not creating services for others.
+
+✅ CORRECT PERSPECTIVE:
+- "I built this tool to solve my own problem with..."
+- "I needed a way to handle my own..."
+- "This helps me manage my own..."
+- "I created this for my own use because..."
+
+❌ INCORRECT PERSPECTIVE:
+- "I built this for farmers to..."
+- "This helps farmers with..."
+- "Farmers can now..."
+- "This system serves farmers by..."
+
 ---
 
 ## 1. Content Structure: Use Clear Headings

@@ -1,0 +1,901 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Facebook Content Generator Bot - Comprehensive System Test
+
+## Test Overview
+**Date**: [TO BE FILLED]
+**Tester**: [TO BE FILLED]
+**Bot Version**: Phase 4 with Pre-Generation Tone Selection
+**Environment**: Local Testing
+
+## Test Categories
+- [x] Basic Bot Commands
+- [x] File Upload & Validation
+- [x] Pre-Generation Tone Selection (NEW)
+- [x] Content Generation & AI Processing
+- [x] Post Management & Editing
+- [x] Multi-Post Series Features
+- [x] Export & Data Management
+- [x] Content Continuation
+- [x] Session Management
+- [x] Error Handling & Edge Cases
+
+---
+
+## 1. BASIC BOT COMMANDS
+
+### Test 1.1: /start Command
+**Test Name**: Initial bot startup and welcome message
+**Expected Result**: 
+- Bot responds with welcome message
+- Explains how the system works (4 steps)
+- Lists available commands
+- Mentions file upload instructions
+- Response time < 2 seconds
+
+**Actual Result**: 
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 1.2: /help Command
+**Test Name**: Help message display
+**Expected Result**:
+- Shows comprehensive help information
+- Lists all 5 brand tones with emojis
+- Explains file requirements (.md/.mdc, 10MB limit)
+- Lists all commands (/start, /status, /help)
+- Clear, formatted message
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 1.3: /status Command
+**Test Name**: System status check
+**Expected Result**:
+- Shows Airtable connection status
+- Displays AI provider and model info
+- Shows recent activity count
+- Confirms system ready status
+- Handles connection failures gracefully
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 1.4: /series Command (No Active Session)
+**Test Name**: Series command without active session
+**Expected Result**:
+- Shows "No active series found" message
+- Prompts to upload markdown file
+- Provides clear next steps
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 1.5: /continue Command
+**Test Name**: Content continuation command
+**Expected Result**:
+- Shows content continuation prompt
+- Explains paste previous post requirement
+- Sets session state correctly
+- Waits for user input
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+## 2. FILE UPLOAD & VALIDATION
+
+### Test 2.1: Valid .md File Upload
+**Test Name**: Upload valid markdown file
+**Expected Result**:
+- Accepts .md file successfully
+- Shows processing message
+- Displays file analysis
+- Proceeds to tone selection interface
+- Processing time < 5 seconds
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 2.2: Valid .mdc File Upload
+**Test Name**: Upload valid .mdc file
+**Expected Result**:
+- Accepts .mdc file successfully
+- Same processing as .md file
+- Proceeds to tone selection
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 2.3: Invalid File Type
+**Test Name**: Upload non-markdown file (e.g., .txt, .docx)
+**Expected Result**:
+- Rejects file with clear error message
+- Explains only .md/.mdc files accepted
+- Provides helpful guidance
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 2.4: File Size Limit Test
+**Test Name**: Upload file larger than 10MB
+**Expected Result**:
+- Rejects file with size error
+- Shows current size limit
+- Provides clear error message
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 2.5: Empty File Upload
+**Test Name**: Upload empty or minimal content file
+**Expected Result**:
+- Accepts file but handles gracefully
+- Still proceeds to tone selection
+- May show basic tone recommendations
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+## 3. PRE-GENERATION TONE SELECTION (NEW FEATURE)
+
+### Test 3.1: Smart Tone Recommendations
+**Test Name**: Content analysis and tone suggestions
+**Expected Result**:
+- Analyzes uploaded content
+- Shows top 2 recommended tones
+- Provides reasoning for recommendations
+- Recommendations match content type
+
+**Test Content**: Upload file with "built", "created", "implemented" keywords
+**Expected Recommendations**: Behind-the-Build, Problem → Solution → Result
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 3.2: All Tone Options Display
+**Test Name**: Complete tone selection interface
+**Expected Result**:
+- Shows all 5 tone options with emojis
+- Recommended tones highlighted
+- Non-recommended tones still available
+- Clear visual distinction
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 3.3: Tone Preview Functionality
+**Test Name**: "Show Tone Previews" button
+**Expected Result**:
+- Shows example opening for each tone
+- Clear formatting with tone names
+- Example text matches tone style
+- Back button works correctly
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 3.4: AI Choose Option
+**Test Name**: "Let AI Choose Best Tone" selection
+**Expected Result**:
+- Shows AI analyzing message
+- Generates post with AI-selected tone
+- Displays chosen tone in results
+- Tone choice is appropriate
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 3.5: Specific Tone Selection
+**Test Name**: Choose specific recommended tone
+**Expected Result**:
+- Shows generation progress message
+- Generates post with selected tone
+- Tone matches user selection
+- Generation completes successfully
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 3.6: Non-Recommended Tone Selection
+**Test Name**: Choose non-recommended tone
+**Expected Result**:
+- Accepts selection without issues
+- Generates post with chosen tone
+- Quality remains high despite non-recommendation
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 3.7: Tone Selection Navigation
+**Test Name**: Back and forth navigation
+**Expected Result**:
+- Back button returns to tone selection
+- Navigation preserves session state
+- No data loss during navigation
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+## 4. CONTENT GENERATION & AI PROCESSING
+
+### Test 4.1: Post Generation Quality
+**Test Name**: Generated post content quality
+**Expected Result**:
+- 400-600 word target length
+- First-person voice only ("I", never "we")
+- No time references
+- Proper tone style implementation
+- Engaging and readable content
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 4.2: All Five Tone Styles
+**Test Name**: Generate posts with each tone
+**Expected Result**:
+Each tone produces distinct style:
+- Behind-the-Build: Matter-of-fact process sharing
+- What Broke: Honest reflection on mistakes
+- Finished & Proud: Quiet satisfaction
+- Problem → Solution → Result: Direct, practical
+- Mini Lesson: Thoughtful insights
+
+**Actual Result**:
+Behind-the-Build: [TO BE FILLED]
+What Broke: [TO BE FILLED]
+Finished & Proud: [TO BE FILLED]
+Problem → Solution → Result: [TO BE FILLED]
+Mini Lesson: [TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 4.3: AI Reasoning Display
+**Test Name**: AI tone reasoning explanation
+**Expected Result**:
+- Shows why AI chose specific tone
+- Reasoning makes sense
+- Helps user understand decision
+- Reasonably detailed explanation
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 4.4: Content Truncation Handling
+**Test Name**: Long content display handling
+**Expected Result**:
+- Very long posts truncated for display
+- Shows truncation indicator
+- Full content saved to Airtable
+- No loss of functionality
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+## 5. POST MANAGEMENT & EDITING
+
+### Test 5.1: Post Approval Process
+**Test Name**: Approve generated post
+**Expected Result**:
+- Shows success message with series info
+- Saves to Airtable successfully
+- Updates session with post count
+- Provides next action options
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 5.2: Post Regeneration
+**Test Name**: Regenerate post with different approach
+**Expected Result**:
+- Shows regeneration progress
+- Produces different content
+- Maintains same source material
+- Preserves context awareness
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 5.3: Tone Change After Generation
+**Test Name**: Change tone after initial generation
+**Expected Result**:
+- Shows tone options menu
+- Regenerates with new tone
+- Content style changes appropriately
+- Maintains quality standards
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 5.4: Session Cancellation
+**Test Name**: Cancel current session
+**Expected Result**:
+- Clears session data
+- Shows cancellation message
+- Prompts for new file upload
+- No data corruption
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+## 6. MULTI-POST SERIES FEATURES
+
+### Test 6.1: Generate Another Post
+**Test Name**: Create follow-up post from same content
+**Expected Result**:
+- Shows relationship selection interface
+- Lists all relationship types
+- Provides clear descriptions
+- Maintains series context
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 6.2: Relationship Type Selection
+**Test Name**: Test each relationship type
+**Expected Result**:
+Each relationship type works properly:
+- Different Aspects: Explores different facets
+- Different Angles: Alternative viewpoints
+- Series Continuation: Sequential narrative
+- Thematic Connection: Shared themes
+- Technical Deep Dive: Detailed technical focus
+- Sequential Story: Chronological continuation
+
+**Actual Result**:
+Different Aspects: [TO BE FILLED]
+Different Angles: [TO BE FILLED]
+Series Continuation: [TO BE FILLED]
+Thematic Connection: [TO BE FILLED]
+Technical Deep Dive: [TO BE FILLED]
+Sequential Story: [TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 6.3: Previous Post Selection
+**Test Name**: Choose which post to build upon
+**Expected Result**:
+- Shows all previous posts
+- Displays post summaries
+- "Most recent" option available
+- Selection works correctly
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 6.4: Generation Confirmation
+**Test Name**: Connection preview and confirmation
+**Expected Result**:
+- Shows connection strength indicator
+- Displays relationship preview
+- Shows reading sequence
+- Generates post after confirmation
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 6.5: Series Context Awareness
+**Test Name**: Context-aware post generation
+**Expected Result**:
+- New posts reference previous posts
+- Maintains narrative continuity
+- Avoids repetition
+- Builds on established context
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+## 7. SERIES OVERVIEW & MANAGEMENT
+
+### Test 7.1: /series Command (Active Session)
+**Test Name**: Series overview with active session
+**Expected Result**:
+- Shows comprehensive series info
+- Displays series tree structure
+- Shows statistics and metadata
+- Provides management options
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 7.2: Series Statistics
+**Test Name**: Series statistics calculation
+**Expected Result**:
+- Accurate post count
+- Correct tone distribution
+- Proper relationship type tracking
+- Reasonable creation timespan
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 7.3: Series Tree Display
+**Test Name**: Hierarchical post structure
+**Expected Result**:
+- Shows parent-child relationships
+- Proper tree formatting
+- Includes post summaries
+- Easy to understand structure
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 7.4: Individual Post Management
+**Test Name**: Manage individual posts
+**Expected Result**:
+- Lists all posts with summaries
+- Provides view/edit/delete options
+- Actions work correctly
+- Maintains series integrity
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 7.5: Post Deletion
+**Test Name**: Delete post from series
+**Expected Result**:
+- Shows confirmation dialog
+- Removes post from series
+- Updates Airtable record
+- Recalculates series statistics
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 7.6: Individual Post Regeneration
+**Test Name**: Regenerate specific post from series
+**Expected Result**:
+- Preserves post context
+- Generates new content
+- Updates series and Airtable
+- Maintains relationships
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+## 8. EXPORT & DATA MANAGEMENT
+
+### Test 8.1: Markdown Export
+**Test Name**: Export series as markdown
+**Expected Result**:
+- Creates complete markdown file
+- Includes all posts and metadata
+- Proper formatting and structure
+- File downloads successfully
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 8.2: Summary Export
+**Test Name**: Export series summary
+**Expected Result**:
+- Creates concise text summary
+- Includes key statistics
+- Shows post relationships
+- Easy to read format
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 8.3: Airtable Link Export
+**Test Name**: Generate Airtable links
+**Expected Result**:
+- Shows direct links to records
+- Includes filter instructions
+- Links work correctly
+- Proper base/table references
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+## 9. CONTENT CONTINUATION
+
+### Test 9.1: Continue Command Usage
+**Test Name**: Content continuation workflow
+**Expected Result**:
+- Accepts pasted post content
+- Analyzes for continuation opportunities
+- Generates natural follow-up
+- Maintains original post context
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 9.2: Continuation Quality
+**Test Name**: Follow-up post quality
+**Expected Result**:
+- Natural references to original
+- Adds new value/perspective
+- Maintains consistent voice
+- Appropriate length and tone
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+## 10. SESSION MANAGEMENT
+
+### Test 10.1: Session State Persistence
+**Test Name**: Session data preservation
+**Expected Result**:
+- Maintains session across operations
+- Preserves post history
+- Keeps series context
+- Handles state transitions
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 10.2: New File Session
+**Test Name**: Start new session with different file
+**Expected Result**:
+- Clears previous session
+- Starts fresh with new content
+- Maintains user preferences
+- No data contamination
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 10.3: Session Completion
+**Test Name**: Finish session workflow
+**Expected Result**:
+- Shows session summary
+- Clears session data
+- Provides next steps
+- Saves all data to Airtable
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+## 11. ERROR HANDLING & EDGE CASES
+
+### Test 11.1: Network Connectivity Issues
+**Test Name**: Handle network failures
+**Expected Result**:
+- Graceful error messages
+- Retry mechanisms where appropriate
+- User-friendly explanations
+- System remains stable
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 11.2: Invalid Markdown Content
+**Test Name**: Handle malformed markdown
+**Expected Result**:
+- Processes content anyway
+- Shows warnings if necessary
+- Doesn't crash system
+- Produces reasonable output
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 11.3: AI Generation Failures
+**Test Name**: Handle AI processing errors
+**Expected Result**:
+- Clear error messages
+- Retry options provided
+- Fallback mechanisms
+- No data loss
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 11.4: Airtable Connection Issues
+**Test Name**: Handle Airtable failures
+**Expected Result**:
+- Continues operation locally
+- Shows connection status
+- Queues data for later sync
+- Informative error messages
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 11.5: Session Timeout/Expiry
+**Test Name**: Handle expired sessions
+**Expected Result**:
+- Detects expired sessions
+- Shows appropriate message
+- Prompts for new file upload
+- Cleans up session data
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 11.6: Large File Processing
+**Test Name**: Handle large but valid files
+**Expected Result**:
+- Processes within time limits
+- Shows progress indicators
+- Maintains responsiveness
+- Completes successfully
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+## 12. USER PREFERENCE TRACKING
+
+### Test 12.1: Tone Preference Learning
+**Test Name**: Track user tone selections
+**Expected Result**:
+- Logs tone preferences
+- Shows in system logs
+- Maintains user history
+- Prepares for future recommendations
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+### Test 12.2: AI Choice Tracking
+**Test Name**: Track AI tone decisions
+**Expected Result**:
+- Logs AI tone choices
+- Records context for learning
+- Maintains decision history
+- Enables improvement analysis
+
+**Actual Result**:
+[TO BE FILLED]
+
+**Status**: [ ] PASS [ ] FAIL [ ] PARTIAL
+
+---
+
+## TEST SUMMARY
+
+### Overall Statistics
+- **Total Tests**: 47
+- **Passed**: [TO BE FILLED]
+- **Failed**: [TO BE FILLED]
+- **Partial**: [TO BE FILLED]
+- **Success Rate**: [TO BE FILLED]%
+
+### Critical Issues Found
+[TO BE FILLED]
+
+### Minor Issues Found
+[TO BE FILLED]
+
+### Recommendations
+[TO BE FILLED]
+
+### Next Steps
+[TO BE FILLED]
+
+---
+
+## TESTING INSTRUCTIONS
+
+### Pre-Test Setup
+1. Ensure network connectivity
+2. Verify `.env` file configuration
+3. Prepare test markdown files
+4. Start bot with `python scripts/telegram_bot.py`
+
+### Test Execution
+1. Go through each test systematically
+2. Fill in actual results as you test
+3. Mark status for each test
+4. Note any unexpected behavior
+5. Take screenshots of important features
+
+### Test Files Needed
+Create these test files in `content/dev_journal/`:
+- `test-behind-build-001.md` - File with building/development content
+- `test-what-broke-001.md` - File with error/debugging content
+- `test-finished-proud-001.md` - File with completion/achievement content
+- `test-problem-solution-001.md` - File with problem-solving content
+- `test-mini-lesson-001.md` - File with learning/insight content
+- `test-large-file-001.md` - Large file (close to 10MB)
+- `test-minimal-001.md` - Minimal content file
+
+### Documentation
+- Record all issues with steps to reproduce
+- Note any performance concerns
+- Document user experience observations
+- Suggest improvements for any pain points
+
+**End of Test Document**
