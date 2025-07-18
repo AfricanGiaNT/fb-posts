@@ -107,4 +107,4 @@ If you encounter issues:
 1. Check Render logs first
 2. Verify all environment variables
 3. Test locally before deploying
-4. Check Telegram bot token validity 
+4. Check Telegram bot token validity
