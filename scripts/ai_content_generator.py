@@ -143,7 +143,8 @@ class AIContentGenerator:
     def generate_facebook_post(self, markdown_content: str, user_tone_preference: Optional[str] = None, 
                               session_context: Optional[str] = None, previous_posts: Optional[List[Dict]] = None,
                               relationship_type: Optional[str] = None, parent_post_id: Optional[str] = None,
-                              audience_type: Optional[str] = None) -> Dict:
+                              audience_type: Optional[str] = None, freeform_context: Optional[str] = None,
+                              length_preference: Optional[str] = None) -> Dict:
         """
         Generate a Facebook post from markdown content with context awareness.
         
@@ -171,12 +172,12 @@ class AIContentGenerator:
                 # Use context-aware prompt building
                 full_prompt = self._build_context_aware_prompt(
                     markdown_content, user_tone_preference, session_context, 
-                    previous_posts, relationship_type, parent_post_id, audience_type
+                    previous_posts, relationship_type, parent_post_id, audience_type, freeform_context, length_preference
                 )
                 system_prompt = self._get_context_aware_system_prompt(audience_type)
             else:
                 # Use original single-post prompt
-                full_prompt = self._build_full_prompt(markdown_content, user_tone_preference, audience_type)
+                full_prompt = self._build_full_prompt(markdown_content, user_tone_preference, audience_type, freeform_context, length_preference)
                 system_prompt = self._get_system_prompt(audience_type)
             
             # Generate content using OpenAI
@@ -206,20 +207,27 @@ class AIContentGenerator:
         except Exception as e:
             raise Exception(f"Error generating Facebook post: {str(e)}")
     
-    def _build_full_prompt(self, markdown_content: str, user_tone_preference: Optional[str] = None, audience_type: Optional[str] = None) -> str:
+    def _build_full_prompt(self, markdown_content: str, user_tone_preference: Optional[str] = None, audience_type: Optional[str] = None, freeform_context: Optional[str] = None, length_preference: Optional[str] = None) -> str:
         """Build the complete prompt for the AI."""
         prompt_parts = []
         
-        # Default to business audience for better language simplification
-        if audience_type is None:
-            audience_type = 'business'
-            
-        if audience_type:
-            audience_instructions = self._get_audience_instructions(audience_type)
-            prompt_parts.append(audience_instructions)
-
+        # Simple, direct user prompt
+        prompt_parts.append("You are an AI assistant tasked with generating a Facebook post for a small business owner based on project notes. Your goal is to create an engaging, conversational post that explains a technical accomplishment in simple terms.")
+        
+        # Add tone preference if provided
         if user_tone_preference:
             prompt_parts.append(f"Please use the '{user_tone_preference}' tone style for this post.")
+        
+        # Add length preference if provided
+        if length_preference:
+            if length_preference == 'short':
+                prompt_parts.append("Please create a SHORT-FORM post (2-3 paragraphs maximum, concise and to the point).")
+            elif length_preference == 'long':
+                prompt_parts.append("Please create a LONG-FORM post (4-6 paragraphs, detailed and comprehensive).")
+        
+        # Add free-form context if provided
+        if freeform_context:
+            prompt_parts.append(f"Additional Context/Instructions: {freeform_context}")
         
         prompt_parts.append("Here is the markdown content to transform:")
         prompt_parts.append("---")
@@ -231,17 +239,13 @@ class AIContentGenerator:
     def _build_context_aware_prompt(self, markdown_content: str, user_tone_preference: Optional[str], 
                                    session_context: Optional[str], previous_posts: Optional[List[Dict]], 
                                    relationship_type: Optional[str], parent_post_id: Optional[str],
-                                   audience_type: Optional[str] = None) -> str:
+                                   audience_type: Optional[str] = None, freeform_context: Optional[str] = None,
+                                   length_preference: Optional[str] = None) -> str:
         """Build a context-aware prompt for multi-post generation."""
         prompt_parts = []
         
-        # Default to business audience for better language simplification
-        if audience_type is None:
-            audience_type = 'business'
-            
-        if audience_type:
-            audience_instructions = self._get_audience_instructions(audience_type)
-            prompt_parts.append(audience_instructions)
+        # Simple, direct user prompt
+        prompt_parts.append("You are an AI assistant tasked with generating a Facebook post for a small business owner based on project notes. Your goal is to create an engaging, conversational post that explains a technical accomplishment in simple terms.")
 
         # Add relationship-specific instructions
         if relationship_type:
@@ -302,6 +306,13 @@ class AIContentGenerator:
         # Add tone preference if specified
         if user_tone_preference:
             prompt_parts.append(f"TONE PREFERENCE: Use the '{user_tone_preference}' tone style for this post.")
+        
+        # Add length preference if specified
+        if length_preference:
+            if length_preference == 'short':
+                prompt_parts.append("LENGTH PREFERENCE: Create a SHORT-FORM post (2-3 paragraphs maximum, concise and to the point).")
+            elif length_preference == 'long':
+                prompt_parts.append("LENGTH PREFERENCE: Create a LONG-FORM post (4-6 paragraphs, detailed and comprehensive).")
         
         # Add reference generation instructions
         if parent_post_id and previous_posts:
@@ -370,6 +381,11 @@ DYNAMIC CONTENT EXTRACTION BASED ON RELATIONSHIP TYPE:
         content_extraction_guidance = self._get_content_extraction_guidance(relationship_type)
         if content_extraction_guidance:
             prompt_parts.append(content_extraction_guidance)
+        
+        # Add free-form context if provided
+        if freeform_context:
+            prompt_parts.append(f"ADDITIONAL CONTEXT/INSTRUCTIONS: {freeform_context}")
+            prompt_parts.append("Please incorporate these instructions while maintaining the core content and requested tone.")
         
         prompt_parts.append("MARKDOWN CONTENT TO TRANSFORM:")
         prompt_parts.append("---")
@@ -533,23 +549,49 @@ Create content that shares real-world deployment insights, user feedback, and op
     def _get_business_audience_instructions(self) -> str:
         """Get specific instructions for business audience."""
         return """
-AUDIENCE: Business Owner/General (people who might be interested in automation and tech solutions)
+AUDIENCE: Business Owner/General (people who might be interested in or benefit from automation and tech solutions)
 
-Content Guidelines:
-- Write from YOUR perspective about YOUR own projects
-- Share what YOU built for YOUR own use, not for others
-- Use simple, clear language without technical jargon
-- Focus on what the feature does and why YOU needed it
-- Mention the practical benefits YOU get from it
-- Keep it conversational but professional
-- Avoid excessive examples or analogies
+FEATURE-FIRST STORYTELLING:
+- Focus your post on the specific feature you implemented. If you mention any tools, always explain them in relation to the feature and its impact. Do not make the tool the main subject.
 
-Language Style:
+FORMATTING GUIDELINES:
+- Use 2-4 relevant emojis to enhance readability and engagement.
+- Format your post for Facebook:
+    - Start with an engaging hook
+    - Use line breaks for readability
+    - Keep paragraphs short (2-3 sentences)
+    - Use bullet points or numbered lists if helpful
+- Do not include fictional or imaginary scenarios—stick to real features and outcomes.
+- Use authentic, real-world examples from your actual implementation.
+
+TECHNICAL LANGUAGE BALANCE:
+- You may use up to 3 technical terms per post, but each must be immediately explained in simple, everyday language. For example:
+    - "API (a way for different software to talk to each other)"
+    - "Database (where all the information is stored)"
+    - "Machine learning (where the computer learns patterns)"
+- Avoid technical jargon without explanation.
+
+CONTENT GUIDELINES:
+- Write from YOUR perspective about YOUR own projects and the features you are implementing.
+- Share what YOU built for YOUR own use, not for others.
+- Focus on what the feature does and why YOU needed it.
+- Mention the practical benefits YOU get from it.
+- Keep it conversational but professional.
+- Avoid excessive examples or analogies.
+
+LANGUAGE STYLE:
 - "I built this feature to help me..."
 - "This saves me time because..."
 - "I needed something that could..."
 - "Now I can..."
 - "The result is..."
+
+OUTPUT FORMAT:
+TONE: [chosen tone, e.g., 🎉 Finished & Proud]
+POST: [the Facebook post content]
+REASON: [briefly explain why you chose this tone and how it fits the content/audience]
+
+End your post with a genuine question or prompt to encourage engagement.
 
 Remember: You're sharing YOUR development journey and achievements, not selling services to others.
 """
@@ -889,6 +931,31 @@ This is YOUR personal feature update that YOU worked on YOURSELF. Share it authe
 - Avoid making it sound like you're documenting an entire project journey
 - Present it as "I built this feature..." not "I'm working on this project..."
 
+**FEATURE-FIRST STORYTELLING:**
+- Focus primarily on FEATURES you implemented, not the tools benefiting from these features
+- When mentioning tools, always contextualize them within the feature discussion
+- Lead with what the feature does and accomplishes, not what technology it uses
+- Share the problem the feature solves and the impact it has
+
+**FORMATTING GUIDELINES:**
+- Use strategic emojis (2-4 per post) to enhance readability and engagement
+- Format for Facebook algorithm optimization:
+  - Use line breaks for readability
+  - Include engaging hooks in the first line
+  - Use bullet points or numbered lists when appropriate
+  - Keep paragraphs short (2-3 sentences max)
+- NO fictional scenarios or imaginary stories - stick to what was actually built
+- Use authentic, real-world examples from your actual implementation
+
+**TECHNICAL LANGUAGE BALANCE:**
+- Maximum 3 technical terms per post
+- Always explain technical terms in simple, layman's terms immediately after use
+- Good examples:
+  - "I built an API (a way for different software to talk to each other) that..."
+  - "The database (where all the information is stored) now..."
+  - "I used machine learning (where the computer learns patterns) to..."
+- Avoid technical jargon without explanation
+
 **Content Processing Instructions:**
 - The markdown content represents a completed feature implementation with rich documentation
 - Extract information from specific sections based on relationship type and content focus
@@ -966,6 +1033,31 @@ This is YOUR personal feature that YOU built for YOURSELF. Share it authenticall
 - Explain the problem it solves and the benefits it provides
 - Avoid making it sound like you're documenting an entire project journey
 - Present it as "I built this feature..." not "I'm working on this project..."
+
+**FEATURE-FIRST STORYTELLING:**
+- Focus primarily on FEATURES you implemented, not the tools benefiting from these features
+- When mentioning tools, always contextualize them within the feature discussion
+- Lead with what the feature does and accomplishes, not what technology it uses
+- Share the problem the feature solves and the impact it has
+
+**FORMATTING GUIDELINES:**
+- Use strategic emojis (2-4 per post) to enhance readability and engagement
+- Format for Facebook algorithm optimization:
+  - Use line breaks for readability
+  - Include engaging hooks in the first line
+  - Use bullet points or numbered lists when appropriate
+  - Keep paragraphs short (2-3 sentences max)
+- NO fictional scenarios or imaginary stories - stick to what was actually built
+- Use authentic, real-world examples from your actual implementation
+
+**TECHNICAL LANGUAGE BALANCE:**
+- Maximum 3 technical terms per post
+- Always explain technical terms in simple, layman's terms immediately after use
+- Good examples:
+  - "I built an API (a way for different software to talk to each other) that..."
+  - "The database (where all the information is stored) now..."
+  - "I used machine learning (where the computer learns patterns) to..."
+- Avoid technical jargon without explanation
 
 ---
 
@@ -1193,7 +1285,7 @@ REASON: [brief explanation of tone choice and audience fit]
     def regenerate_post(self, markdown_content: str, feedback: str = "", tone_preference: Optional[str] = None,
                        session_context: Optional[str] = None, previous_posts: Optional[List[Dict]] = None,
                        relationship_type: Optional[str] = None, parent_post_id: Optional[str] = None,
-                       audience_type: Optional[str] = None) -> Dict:
+                       audience_type: Optional[str] = None, length_preference: Optional[str] = None) -> Dict:
         """
         Regenerate a Facebook post with feedback and context awareness.
         
@@ -1222,12 +1314,12 @@ REASON: [brief explanation of tone choice and audience fit]
                 # Build context-aware regeneration prompt
                 regeneration_prompt = self._build_context_aware_regeneration_prompt(
                     markdown_content, feedback, tone_preference, session_context, 
-                    previous_posts, relationship_type, parent_post_id, audience_type
+                    previous_posts, relationship_type, parent_post_id, audience_type, length_preference
                 )
                 system_prompt = self._get_context_aware_system_prompt(audience_type)
             else:
                 # Use original regeneration prompt
-                regeneration_prompt = self._build_regeneration_prompt(markdown_content, feedback, tone_preference, audience_type)
+                regeneration_prompt = self._build_regeneration_prompt(markdown_content, feedback, tone_preference, audience_type, length_preference)
                 system_prompt = self._get_system_prompt(audience_type)
             
             generated_content = self._generate_content(
@@ -1256,7 +1348,7 @@ REASON: [brief explanation of tone choice and audience fit]
         except Exception as e:
             raise Exception(f"Error regenerating Facebook post: {str(e)}")
     
-    def _build_regeneration_prompt(self, markdown_content: str, feedback: str, tone_preference: Optional[str] = None, audience_type: Optional[str] = None) -> str:
+    def _build_regeneration_prompt(self, markdown_content: str, feedback: str, tone_preference: Optional[str] = None, audience_type: Optional[str] = None, length_preference: Optional[str] = None) -> str:
         """Build prompt for regeneration with feedback."""
         prompt_parts = []
         
@@ -1274,6 +1366,13 @@ REASON: [brief explanation of tone choice and audience fit]
         if tone_preference:
             prompt_parts.append(f"Please use the '{tone_preference}' tone style for this regeneration.")
         
+        # Add length preference if provided
+        if length_preference:
+            if length_preference == 'short':
+                prompt_parts.append("Please create a SHORT-FORM post (2-3 paragraphs maximum, concise and to the point).")
+            elif length_preference == 'long':
+                prompt_parts.append("Please create a LONG-FORM post (4-6 paragraphs, detailed and comprehensive).")
+        
         prompt_parts.append("Here is the original markdown content:")
         prompt_parts.append("---")
         prompt_parts.append(markdown_content)
@@ -1284,7 +1383,8 @@ REASON: [brief explanation of tone choice and audience fit]
     def _build_context_aware_regeneration_prompt(self, markdown_content: str, feedback: str, 
                                                tone_preference: Optional[str], session_context: Optional[str],
                                                previous_posts: Optional[List[Dict]], relationship_type: Optional[str],
-                                               parent_post_id: Optional[str], audience_type: Optional[str] = None) -> str:
+                                               parent_post_id: Optional[str], audience_type: Optional[str] = None,
+                                               length_preference: Optional[str] = None) -> str:
         """Build context-aware regeneration prompt."""
         prompt_parts = []
         
@@ -1320,6 +1420,13 @@ REASON: [brief explanation of tone choice and audience fit]
         # Add tone preference if specified
         if tone_preference:
             prompt_parts.append(f"TONE PREFERENCE: Use the '{tone_preference}' tone style for this regeneration.")
+        
+        # Add length preference if specified
+        if length_preference:
+            if length_preference == 'short':
+                prompt_parts.append("LENGTH PREFERENCE: Create a SHORT-FORM post (2-3 paragraphs maximum, concise and to the point).")
+            elif length_preference == 'long':
+                prompt_parts.append("LENGTH PREFERENCE: Create a LONG-FORM post (4-6 paragraphs, detailed and comprehensive).")
         
         # Add reference generation instructions
         if parent_post_id and previous_posts:
@@ -1519,5 +1626,223 @@ REASON: [brief explanation of tone choice and audience fit]
         prompt_parts.append("---")
         prompt_parts.append(previous_post_text)
         prompt_parts.append("---")
+        
+        return "\n\n".join(prompt_parts) 
+
+    def edit_post(self, original_post_content: str, edit_instructions: str, 
+                  original_tone: str = None, original_markdown: str = None,
+                  session_context: Optional[str] = None, previous_posts: Optional[List[Dict]] = None,
+                  relationship_type: Optional[str] = None, parent_post_id: Optional[str] = None,
+                  audience_type: Optional[str] = None, length_preference: Optional[str] = None) -> Dict:
+        """
+        Edit an existing Facebook post with specific instructions.
+        
+        Args:
+            original_post_content: The existing post content to edit
+            edit_instructions: Specific instructions for what to change
+            original_tone: The tone used in the original post
+            original_markdown: The original markdown content (for context)
+            session_context: Context from previous posts in the series
+            previous_posts: List of previous posts in the series
+            relationship_type: How this post relates to previous posts
+            parent_post_id: ID of the parent post to reference
+            audience_type: The target audience ('business' or 'technical')
+            length_preference: Length preference for the edited post
+            
+        Returns:
+            Dict containing the edited post, tone used, and metadata
+        """
+        # Default to business audience for better language simplification
+        if audience_type is None:
+            audience_type = 'business'
+            
+        try:
+            # Determine if this is a context-aware edit
+            is_context_aware = bool(session_context or previous_posts or relationship_type)
+            
+            if is_context_aware:
+                # Build context-aware edit prompt
+                edit_prompt = self._build_context_aware_edit_prompt(
+                    original_post_content, edit_instructions, original_tone, original_markdown,
+                    session_context, previous_posts, relationship_type, parent_post_id, 
+                    audience_type, length_preference
+                )
+                system_prompt = self._get_context_aware_system_prompt(audience_type)
+            else:
+                # Use simple edit prompt
+                edit_prompt = self._build_edit_prompt(
+                    original_post_content, edit_instructions, original_tone, original_markdown,
+                    audience_type, length_preference
+                )
+                system_prompt = self._get_system_prompt(audience_type)
+            
+            generated_content = self._generate_content(
+                system_prompt, edit_prompt, temperature=0.7, max_tokens=4000
+            )
+            
+            parsed_response = self._parse_ai_response(generated_content)
+            
+            result = {
+                'post_content': parsed_response.get('post', generated_content),
+                'tone_used': parsed_response.get('tone', original_tone or 'Unknown'),
+                'tone_reason': parsed_response.get('reason', f'Edited from {original_tone or "Unknown"} tone'),
+                'generated_at': datetime.now().isoformat(),
+                'model_used': self.model,
+                'original_markdown': original_markdown,
+                'edited_from_content': original_post_content,
+                'edit_instructions': edit_instructions,
+                'is_edit': True,
+                'is_context_aware': is_context_aware,
+                'relationship_type': relationship_type,
+                'parent_post_id': parent_post_id,
+                'audience_type': audience_type
+            }
+            
+            return result
+            
+        except Exception as e:
+            raise Exception(f"Error editing Facebook post: {str(e)}")
+    
+    def _build_edit_prompt(self, original_post_content: str, edit_instructions: str, 
+                          original_tone: str = None, original_markdown: str = None,
+                          audience_type: Optional[str] = None, length_preference: Optional[str] = None) -> str:
+        """Build prompt for editing an existing post."""
+        prompt_parts = []
+        
+        # Default to business audience for better language simplification
+        if audience_type is None:
+            audience_type = 'business'
+            
+        if audience_type:
+            audience_instructions = self._get_audience_instructions(audience_type)
+            prompt_parts.append(audience_instructions)
+        
+        prompt_parts.append("You are editing an existing Facebook post. Please make the requested changes while maintaining the overall structure and quality.")
+        
+        # Add the original post content
+        prompt_parts.append("ORIGINAL POST CONTENT:")
+        prompt_parts.append("---")
+        prompt_parts.append(original_post_content)
+        prompt_parts.append("---")
+        
+        # Add edit instructions
+        prompt_parts.append("EDIT INSTRUCTIONS:")
+        prompt_parts.append(f"{edit_instructions}")
+        
+        # Add original tone information if available
+        if original_tone:
+            prompt_parts.append(f"ORIGINAL TONE: {original_tone}")
+            prompt_parts.append("Please maintain this tone unless the edit instructions specifically request a tone change.")
+        
+        # Add length preference if provided
+        if length_preference:
+            if length_preference == 'short':
+                prompt_parts.append("LENGTH PREFERENCE: Make the edited post SHORT-FORM (2-3 paragraphs maximum, concise and to the point).")
+            elif length_preference == 'long':
+                prompt_parts.append("LENGTH PREFERENCE: Make the edited post LONG-FORM (4-6 paragraphs, detailed and comprehensive).")
+        
+        # Add original markdown context if available
+        if original_markdown:
+            prompt_parts.append("ORIGINAL MARKDOWN CONTEXT:")
+            prompt_parts.append("---")
+            prompt_parts.append(original_markdown)
+            prompt_parts.append("---")
+        
+        prompt_parts.append("""
+EDITING GUIDELINES:
+1. Make ONLY the changes requested in the edit instructions
+2. Preserve the overall structure and flow of the original post
+3. Maintain the same tone and voice unless specifically asked to change
+4. Keep the same level of detail and engagement
+5. Ensure the edited post flows naturally and reads well
+6. Preserve any specific examples, analogies, or technical details that weren't mentioned in the edit instructions
+7. Make targeted, surgical edits rather than rewriting the entire post
+
+Please provide the edited post content:""")
+        
+        return "\n\n".join(prompt_parts)
+    
+    def _build_context_aware_edit_prompt(self, original_post_content: str, edit_instructions: str,
+                                       original_tone: str = None, original_markdown: str = None,
+                                       session_context: Optional[str] = None, previous_posts: Optional[List[Dict]] = None, 
+                                       relationship_type: Optional[str] = None, parent_post_id: Optional[str] = None,
+                                       audience_type: Optional[str] = None, length_preference: Optional[str] = None) -> str:
+        """Build context-aware edit prompt."""
+        prompt_parts = []
+        
+        # Default to business audience for better language simplification
+        if audience_type is None:
+            audience_type = 'business'
+            
+        if audience_type:
+            audience_instructions = self._get_audience_instructions(audience_type)
+            prompt_parts.append(audience_instructions)
+        
+        prompt_parts.append("You are editing an existing Facebook post within a series. Please make the requested changes while maintaining series coherence and context.")
+        
+        # Add relationship-specific instructions
+        if relationship_type:
+            relationship_instructions = self._get_relationship_instructions(relationship_type)
+            prompt_parts.append(relationship_instructions)
+        
+        # Add session context if available
+        if session_context:
+            prompt_parts.append(f"SERIES CONTEXT:\n{session_context}")
+        
+        # Add previous posts context
+        if previous_posts:
+            prompt_parts.append("PREVIOUS POSTS IN THIS SERIES:")
+            for i, post in enumerate(previous_posts[-3:], 1):
+                prompt_parts.append(f"Post {i}: {post.get('tone_used', 'Unknown')} tone")
+                content_preview = post.get('content', '')[:200] + "..." if len(post.get('content', '')) > 200 else post.get('content', '')
+                prompt_parts.append(f"Content: {content_preview}")
+                prompt_parts.append("")
+        
+        # Add the original post content
+        prompt_parts.append("ORIGINAL POST CONTENT TO EDIT:")
+        prompt_parts.append("---")
+        prompt_parts.append(original_post_content)
+        prompt_parts.append("---")
+        
+        # Add edit instructions
+        prompt_parts.append("EDIT INSTRUCTIONS:")
+        prompt_parts.append(f"{edit_instructions}")
+        
+        # Add original tone information if available
+        if original_tone:
+            prompt_parts.append(f"ORIGINAL TONE: {original_tone}")
+            prompt_parts.append("Please maintain this tone unless the edit instructions specifically request a tone change.")
+        
+        # Add length preference if provided
+        if length_preference:
+            if length_preference == 'short':
+                prompt_parts.append("LENGTH PREFERENCE: Make the edited post SHORT-FORM (2-3 paragraphs maximum, concise and to the point).")
+            elif length_preference == 'long':
+                prompt_parts.append("LENGTH PREFERENCE: Make the edited post LONG-FORM (4-6 paragraphs, detailed and comprehensive).")
+        
+        # Add original markdown context if available
+        if original_markdown:
+            prompt_parts.append("ORIGINAL MARKDOWN CONTEXT:")
+            prompt_parts.append("---")
+            prompt_parts.append(original_markdown)
+            prompt_parts.append("---")
+        
+        # Add content variation strategy for series
+        if relationship_type:
+            variation_strategy = self._get_content_variation_strategy(relationship_type)
+            prompt_parts.append(variation_strategy)
+        
+        prompt_parts.append("""
+CONTEXT-AWARE EDITING GUIDELINES:
+1. Make ONLY the changes requested in the edit instructions
+2. Preserve the overall structure and flow of the original post
+3. Maintain series coherence with previous posts
+4. Keep the same tone and voice unless specifically asked to change
+5. Ensure the edited post maintains its relationship to other posts in the series
+6. Preserve any specific examples, analogies, or technical details that weren't mentioned in the edit instructions
+7. Make targeted, surgical edits rather than rewriting the entire post
+8. Consider how the edited post fits within the broader series narrative
+
+Please provide the edited post content:""")
         
         return "\n\n".join(prompt_parts) 

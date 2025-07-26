@@ -6,6 +6,7 @@
 - **Phase 3**: ✅ UI Enhancement - New workflows, preview system, series management  
 - **Phase 4**: ✅ **COMPLETED** - Audience-aware content, Chichewa humor, content continuation  
 - **Phase 5**: 🚧 **IN PROGRESS** - Multi-file upload system, Phase 5.1 and 5.2 implementation
+- **Context Improvement**: 🟡 **PLANNING** - Enhanced conversational memory and smart context prioritization
 
 ## PHASE 5: Multi-File Upload System Enhancement - ACTIVE IMPLEMENTATION
 
@@ -382,8 +383,60 @@ AI chooses from 5 brand tones:
 - `content/multi_post_enhancement_plan.md` - Overall project progress and technical details
 - `content/phase_3_ui_enhancement_plan.md` - Detailed Phase 3 implementation plan and tracking
 - `content/phase_4_simplified_plan.md` - **UPDATED** - Focused Phase 4 features for business audience
+- `phase-plans/context-improvement-plan.md` - **NEW** - Enhanced conversational memory and smart context prioritization
 
-**Current Status**: Phase 3 complete, Phase 4 simplified planning complete with focus on business owner audience and practical features.
+**Current Status**: Phase 3 complete, Phase 4 simplified planning complete with focus on business owner audience and practical features. Context improvement planning phase initiated.
+
+## CONTEXT IMPROVEMENT: Enhanced Conversational Memory & Smart Context Prioritization
+
+### Overview
+**Vision**: Transform the AI Facebook Content Generator from a stateless request-response system to an intelligent, context-aware assistant that remembers user preferences, learns from interactions, and provides increasingly personalized content generation.
+
+**Key Enhancement**: Session-based learning → intelligent context prioritization → persistent user preference storage.
+
+### Implementation Phases
+
+#### **Phase 1: Enhanced Conversational Memory (Priority 1)**
+**Timeline**: Week 1-2  
+**Status**: 🟡 Planning Phase
+
+**Goal**: Bot remembers user requests, feedback, and chat history throughout the session.
+
+**Key Components**:
+- **Session Chat History Tracking**: Store all user messages, bot responses, tone preferences, and feedback
+- **Request-Response Mapping**: Link generated posts to original requests, track satisfaction patterns
+- **Context-Aware Chat History**: Include relevant chat history in AI prompts, maintain conversation continuity
+
+#### **Phase 2: Smart Context Prioritization (Priority 2)**
+**Timeline**: Week 2-3  
+**Status**: 🟡 Planning Phase
+
+**Goal**: Ensure most relevant context is prioritized in prompts.
+
+**Key Components**:
+- **Context Scoring System**: Score relevance of each context piece, prioritize recent interactions
+- **Dynamic Context Selection**: Select most relevant previous posts, balance context depth with prompt length
+
+#### **Phase 3: Enhanced Storage System (Priority 3)**
+**Timeline**: Week 3-4  
+**Status**: 🟡 Planning Phase
+
+**Goal**: Robust storage for session data and user preferences.
+
+**Key Components**:
+- **Enhanced Session Storage**: Expand current session system, add SQLite database for persistence
+- **User Preference Learning**: Track successful content patterns, learn from user feedback over time
+
+### Technical Architecture
+- **Enhanced Session Structure**: Extended session with chat history, user preferences, and feedback analysis
+- **ContextPrioritizer Class**: Intelligent scoring and selection algorithms for optimal context
+- **Database Schema**: SQLite tables for user sessions, chat history, preferences, and feedback analysis
+
+### Success Metrics
+- **User Satisfaction**: Increase in user satisfaction scores
+- **Regeneration Rate**: Decrease in post regeneration frequency
+- **Context Accuracy**: Improvement in context-aware generation quality
+- **System Performance**: Optimized prompt efficiency and response times
 
 ## File Naming Updates
 

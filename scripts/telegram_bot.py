@@ -5,7 +5,7 @@ Main Telegram Bot for AI Facebook Content Generator
 import logging
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 import uuid
 import random
@@ -27,9 +27,11 @@ from telegram.request import HTTPXRequest, BaseRequest
 from telegram.error import TimedOut, NetworkError, RetryAfter
 from telegram.constants import ParseMode
 
-from config_manager import ConfigManager
-from ai_content_generator import AIContentGenerator
-from airtable_connector import AirtableConnector
+from scripts.config_manager import ConfigManager
+from scripts.ai_content_generator import AIContentGenerator
+from scripts.airtable_connector import AirtableConnector
+from scripts.context_prioritizer import ContextPrioritizer
+from scripts.enhanced_storage import EnhancedStorage
 
 # Configure logging
 logging.basicConfig(
@@ -115,6 +117,12 @@ class FacebookContentBot:
         # Initialize user sessions
         self.user_sessions = {}
         
+        # Phase 2: Initialize Context Prioritizer
+        self.context_prioritizer = ContextPrioritizer()
+        
+        # Phase 3: Initialize Enhanced Storage
+        self.enhanced_storage = EnhancedStorage()
+        
         # Set up command handlers
         self._setup_handlers()
     
@@ -131,6 +139,9 @@ class FacebookContentBot:
         self.application.add_handler(CommandHandler("done", self._done_command))
         self.application.add_handler(CommandHandler("strategy", self._strategy_command))
         self.application.add_handler(CommandHandler("cancel", self._cancel_batch_command))
+        self.application.add_handler(CommandHandler("context", self._context_command))
+        self.application.add_handler(CommandHandler("stats", self._stats_command))
+        self.application.add_handler(CommandHandler("sessions", self._sessions_command))
         
         # Document/file handler
         self.application.add_handler(MessageHandler(filters.Document.ALL, self._handle_document))
@@ -142,7 +153,7 @@ class FacebookContentBot:
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
     
     def _initialize_session(self, user_id: int, markdown_content: str, filename: str) -> Dict:
-        """Initialize a new multi-post session."""
+        """Initialize a new multi-post session with enhanced conversational memory."""
         series_id = str(uuid.uuid4())
         
         session = {
@@ -155,10 +166,36 @@ class FacebookContentBot:
             'last_activity': datetime.now().isoformat(),
             'session_context': '',  # AI context summary for continuity
             'post_count': 0,
-            'state': None # To manage multi-step commands like /continue
+            'state': None, # To manage multi-step commands like /continue
+            
+            # Phase 1: Enhanced Conversational Memory
+            'chat_history': [],  # Store all user messages and bot responses
+            'user_preferences': {
+                'preferred_tones': [],
+                'audience_preferences': {},
+                'content_length_preferences': {},
+                'successful_patterns': [],
+                'avoided_patterns': []
+            },
+            'request_mapping': {
+                'current_request_id': str(uuid.uuid4()),
+                'request_history': [],
+                'content_relationships': {}
+            },
+            'feedback_analysis': {
+                'approval_rate': 0.0,
+                'regeneration_patterns': [],
+                'common_edit_requests': [],
+                'successful_content_elements': []
+            }
         }
         
         self.user_sessions[user_id] = session
+        
+        # Phase 3: Load user preferences from storage
+        stored_preferences = self._load_user_preferences(user_id)
+        session['user_preferences'] = stored_preferences
+        
         return session
     
     def _add_post_to_series(self, user_id: int, post_data: Dict, airtable_record_id: str, 
@@ -186,6 +223,9 @@ class FacebookContentBot:
         
         # Update session context for AI continuity
         self._update_session_context(user_id)
+        
+        # Phase 1: Track successful post approval
+        self._track_post_approval(user_id, post_data, airtable_record_id)
     
     def _update_session_context(self, user_id: int):
         """Update the session context for AI continuity with 5-post limit."""
@@ -217,6 +257,283 @@ class FacebookContentBot:
             context_parts.append("")
         
         session['session_context'] = "\n".join(context_parts)
+    
+    # Phase 1: Enhanced Conversational Memory Methods
+    
+    def _add_chat_history_entry(self, user_id: int, user_message: str, bot_response: str, 
+                               message_type: str, context: Dict = None, satisfaction_score: float = None):
+        """Add a new entry to the chat history."""
+        if user_id not in self.user_sessions:
+            return
+        
+        session = self.user_sessions[user_id]
+        
+        chat_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'user_message': user_message or '',
+            'bot_response': bot_response or '',
+            'message_type': message_type or 'unknown',  # 'file_upload', 'text', 'button_click', 'feedback'
+            'context': context or {},
+            'satisfaction_score': satisfaction_score,
+            'regeneration_count': 0
+        }
+        
+        session['chat_history'].append(chat_entry)
+        session['last_activity'] = datetime.now().isoformat()
+    
+    def _track_post_approval(self, user_id: int, post_data: Dict, airtable_record_id: str):
+        """Track successful post approval and update user preferences."""
+        if user_id not in self.user_sessions:
+            return
+        
+        session = self.user_sessions[user_id]
+        
+        # Track successful tone
+        tone_used = post_data.get('tone_used', 'Unknown')
+        if tone_used not in session['user_preferences']['preferred_tones']:
+            session['user_preferences']['preferred_tones'].append(tone_used)
+        
+        # Track successful content patterns
+        content_summary = post_data.get('post_content', '')[:100]
+        successful_pattern = {
+            'tone': tone_used,
+            'content_summary': content_summary,
+            'timestamp': datetime.now().isoformat(),
+            'airtable_record_id': airtable_record_id
+        }
+        session['user_preferences']['successful_patterns'].append(successful_pattern)
+        
+        # Update approval rate
+        total_posts = len(session['posts'])
+        approved_posts = len([p for p in session['posts'] if p.get('approved_at')])
+        session['feedback_analysis']['approval_rate'] = approved_posts / total_posts if total_posts > 0 else 0.0
+    
+    def _track_post_regeneration(self, user_id: int, reason: str, original_content: str, new_content: str):
+        """Track post regeneration and reasons."""
+        if user_id not in self.user_sessions:
+            return
+        
+        session = self.user_sessions[user_id]
+        
+        regeneration_pattern = {
+            'reason': reason,
+            'original_content_summary': original_content[:100],
+            'new_content_summary': new_content[:100],
+            'timestamp': datetime.now().isoformat()
+        }
+        session['feedback_analysis']['regeneration_patterns'].append(regeneration_pattern)
+        
+        # Track common edit requests
+        if reason not in session['feedback_analysis']['common_edit_requests']:
+            session['feedback_analysis']['common_edit_requests'].append(reason)
+    
+    def _track_user_feedback(self, user_id: int, feedback_type: str, feedback_data: Dict, satisfaction_score: float = None):
+        """Track user feedback and satisfaction."""
+        if user_id not in self.user_sessions:
+            return
+        
+        session = self.user_sessions[user_id]
+        
+        # Add to chat history
+        self._add_chat_history_entry(
+            user_id=user_id,
+            user_message=f"Feedback: {feedback_type}",
+            bot_response="Feedback recorded",
+            message_type="feedback",
+            context=feedback_data,
+            satisfaction_score=satisfaction_score
+        )
+        
+        # Update feedback analysis
+        if satisfaction_score is not None:
+            session['feedback_analysis']['approval_rate'] = (
+                session['feedback_analysis']['approval_rate'] + satisfaction_score
+            ) / 2
+    
+    def _get_relevant_chat_history(self, user_id: int, current_request: Dict, max_entries: int = 5) -> List[Dict]:
+        """Get the most relevant chat history entries for the current request using smart prioritization."""
+        if user_id not in self.user_sessions:
+            return []
+        
+        session = self.user_sessions[user_id]
+        chat_history = session.get('chat_history', [])
+        
+        if not chat_history:
+            return []
+        
+        # Phase 2: Use smart context prioritization
+        # Score all context items and return the most relevant ones
+        scored_items = [
+            (item, self.context_prioritizer.score_context_relevance(item, current_request))
+            for item in chat_history
+        ]
+        
+        # Sort by relevance score (highest first) and return top entries
+        scored_items.sort(key=lambda x: x[1], reverse=True)
+        relevant_entries = [item for item, score in scored_items[:max_entries]]
+        
+        return relevant_entries
+    
+    def _get_optimized_context_for_prompt(self, user_id: int, current_request: Dict, max_tokens: int = 2000) -> str:
+        """
+        Get optimized context for AI prompts using smart prioritization.
+        
+        Args:
+            user_id: User ID
+            current_request: Current request being processed
+            max_tokens: Maximum tokens allowed for context
+            
+        Returns:
+            Formatted context string for AI prompts
+        """
+        if user_id not in self.user_sessions:
+            return ""
+        
+        session = self.user_sessions[user_id]
+        
+        # Phase 2: Use ContextPrioritizer for optimal context selection
+        optimized_context = self.context_prioritizer.select_optimal_context(
+            session=session,
+            current_request=current_request,
+            max_tokens=max_tokens
+        )
+        
+        return optimized_context
+    
+    def _get_context_statistics(self, user_id: int) -> Dict:
+        """
+        Get statistics about the user's context for analysis.
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            Dictionary with context statistics
+        """
+        if user_id not in self.user_sessions:
+            return {"total_interactions": 0}
+        
+        session = self.user_sessions[user_id]
+        return self.context_prioritizer.get_context_statistics(session)
+    
+    def _save_session_to_storage(self, user_id: int, session: Dict) -> bool:
+        """
+        Save session to enhanced storage.
+        
+        Args:
+            user_id: User ID
+            session: Session data to save
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            return self.enhanced_storage.save_session(user_id, session)
+        except Exception as e:
+            logger.error(f"Error saving session to storage: {str(e)}")
+            return False
+    
+    def _load_session_from_storage(self, user_id: int, session_id: str) -> Optional[Dict]:
+        """
+        Load session from enhanced storage.
+        
+        Args:
+            user_id: User ID
+            session_id: Session ID to load
+            
+        Returns:
+            Session data if found, None otherwise
+        """
+        try:
+            return self.enhanced_storage.load_session(user_id, session_id)
+        except Exception as e:
+            logger.error(f"Error loading session from storage: {str(e)}")
+            return None
+    
+    def _save_user_preferences(self, user_id: int, preferences: Dict) -> bool:
+        """
+        Save user preferences to enhanced storage.
+        
+        Args:
+            user_id: User ID
+            preferences: User preferences to save
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            return self.enhanced_storage.save_user_preferences(user_id, preferences)
+        except Exception as e:
+            logger.error(f"Error saving user preferences: {str(e)}")
+            return False
+    
+    def _load_user_preferences(self, user_id: int) -> Dict:
+        """
+        Load user preferences from enhanced storage.
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            User preferences dictionary
+        """
+        try:
+            return self.enhanced_storage.load_user_preferences(user_id)
+        except Exception as e:
+            logger.error(f"Error loading user preferences: {str(e)}")
+            return {
+                'preferred_tones': [],
+                'audience_preferences': {},
+                'content_length_preferences': {},
+                'successful_patterns': [],
+                'avoided_patterns': []
+            }
+    
+    def _get_user_statistics(self, user_id: int) -> Dict:
+        """
+        Get comprehensive user statistics from enhanced storage.
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            User statistics dictionary
+        """
+        try:
+            return self.enhanced_storage.get_user_statistics(user_id)
+        except Exception as e:
+            logger.error(f"Error getting user statistics: {str(e)}")
+            return {"error": str(e)}
+    
+    def _update_user_preferences_from_interaction(self, user_id: int, interaction_data: Dict):
+        """Update user preferences based on current interaction."""
+        if user_id not in self.user_sessions:
+            return
+        
+        session = self.user_sessions[user_id]
+        
+        # Update tone preferences
+        if 'tone_selected' in interaction_data:
+            tone = interaction_data['tone_selected']
+            if tone not in session['user_preferences']['preferred_tones']:
+                session['user_preferences']['preferred_tones'].append(tone)
+        
+        # Update audience preferences
+        if 'audience_type' in interaction_data:
+            audience = interaction_data['audience_type']
+            session['user_preferences']['audience_preferences'][audience] = (
+                session['user_preferences']['audience_preferences'].get(audience, 0) + 1
+            )
+        
+        # Update length preferences
+        if 'length_preference' in interaction_data:
+            length = interaction_data['length_preference']
+            session['user_preferences']['content_length_preferences'][length] = (
+                session['user_preferences']['content_length_preferences'].get(length, 0) + 1
+            )
+        
+        # Phase 3: Save updated preferences to enhanced storage
+        self._save_user_preferences(user_id, session['user_preferences'])
     
     def _escape_markdown(self, text: str) -> str:
         """Escape special characters for MarkdownV2 format."""
@@ -448,7 +765,22 @@ System Ready! 🚀"""
                 # Single file mode
                 session = self._initialize_session(user_id, markdown_content, document.file_name)
                 await processing_msg.delete()
-                await self._show_initial_tone_selection(update, context, session)
+                
+                # Phase 1: Track file upload in chat history
+                self._add_chat_history_entry(
+                    user_id=user_id,
+                    user_message=f"Uploaded file: {document.file_name}",
+                    bot_response="File processed successfully. Asking for context.",
+                    message_type="file_upload",
+                    context={
+                        'filename': document.file_name,
+                        'file_size': document.file_size,
+                        'content_length': len(markdown_content)
+                    }
+                )
+                
+                # Ask for free-form context
+                await self._ask_for_file_context(update, context, session)
             
         except Exception as e:
             logger.error(f"Error processing document: {str(e)}")
@@ -457,45 +789,107 @@ System Ready! 🚀"""
     async def _generate_and_show_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
                                      markdown_content: str, tone_preference: Optional[str] = None,
                                      is_regeneration: bool = False, relationship_type: Optional[str] = None,
-                                     parent_post_id: Optional[str] = None):
+                                     parent_post_id: Optional[str] = None, freeform_context: Optional[str] = None):
         """Generate and display a Facebook post with context awareness."""
         user_id = update.effective_user.id
         
         try:
-            # Get session context if available
-            session_context = None
+            # Phase 2: Get optimized context using smart prioritization
+            optimized_context = ""
             previous_posts = None
+            length_preference = None
             
             if user_id in self.user_sessions:
                 session = self.user_sessions[user_id]
-                session_context = session.get('session_context', '')
                 previous_posts = session.get('posts', [])
+                length_preference = session.get('length_preference')
+                
+                # Create current request context for optimization
+                current_request = {
+                    'type': 'post_generation',
+                    'tone_preference': tone_preference,
+                    'is_regeneration': is_regeneration,
+                    'relationship_type': relationship_type,
+                    'freeform_context': freeform_context,
+                    'content': markdown_content[:200]  # First 200 chars for similarity matching
+                }
+                
+                # Get optimized context using smart prioritization
+                optimized_context = self._get_optimized_context_for_prompt(
+                    user_id=user_id,
+                    current_request=current_request,
+                    max_tokens=1500  # Reserve some tokens for the main prompt
+                )
             
-            # Generate the post with context awareness and business audience
+            # Phase 2: Generate the post with optimized context awareness
             if is_regeneration and tone_preference:
                 post_data = self.ai_generator.regenerate_post(
                     markdown_content, 
                     feedback=f"User requested {tone_preference} tone",
                     tone_preference=tone_preference,
-                    session_context=session_context,
+                    session_context=optimized_context,  # Use optimized context
                     previous_posts=previous_posts,
                     relationship_type=relationship_type,
                     parent_post_id=parent_post_id,
                     audience_type='business'
                 )
             else:
-                post_data = self.ai_generator.generate_facebook_post(
-                    markdown_content, 
-                    user_tone_preference=tone_preference,
-                    session_context=session_context,
-                    previous_posts=previous_posts,
-                    relationship_type=relationship_type,
-                    parent_post_id=parent_post_id,
-                    audience_type='business'
-                )
+                # Use free-form context if provided
+                if freeform_context:
+                    # Build enhanced prompt with free-form context
+                    enhanced_prompt = self._build_context_aware_prompt_with_freeform(
+                        markdown_content, freeform_context, tone_preference
+                    )
+                    # For now, we'll use the regular generation but with enhanced context
+                    # In a full implementation, we'd modify the AI generator to accept custom prompts
+                    post_data = self.ai_generator.generate_facebook_post(
+                        markdown_content, 
+                        user_tone_preference=tone_preference,
+                        session_context=optimized_context,  # Use optimized context
+                        previous_posts=previous_posts,
+                        relationship_type=relationship_type,
+                        parent_post_id=parent_post_id,
+                        audience_type='business',
+                        length_preference=length_preference
+                    )
+                else:
+                    post_data = self.ai_generator.generate_facebook_post(
+                        markdown_content, 
+                        user_tone_preference=tone_preference,
+                        session_context=optimized_context,  # Use optimized context
+                        previous_posts=previous_posts,
+                        relationship_type=relationship_type,
+                        parent_post_id=parent_post_id,
+                        audience_type='business',
+                        length_preference=length_preference
+                    )
             
             # Store in session
             self.user_sessions[user_id]['current_draft'] = post_data
+            
+            # Phase 1: Track post generation in chat history
+            generation_context = {
+                'tone_used': post_data.get('tone_used', 'Unknown'),
+                'is_regeneration': is_regeneration,
+                'relationship_type': relationship_type,
+                'parent_post_id': parent_post_id,
+                'freeform_context': freeform_context
+            }
+            
+            self._add_chat_history_entry(
+                user_id=user_id,
+                user_message=f"Generated post with {post_data.get('tone_used', 'Unknown')} tone",
+                bot_response="Post generated successfully",
+                message_type="post_generation",
+                context=generation_context
+            )
+            
+            # Update user preferences from this interaction
+            interaction_data = {
+                'tone_selected': post_data.get('tone_used', 'Unknown'),
+                'audience_type': 'business'  # Default for now
+            }
+            self._update_user_preferences_from_interaction(user_id, interaction_data)
             
             # Show the post to the user - create a response object for the update
             post_content = post_data.get('post_content', 'No content generated')
@@ -561,7 +955,10 @@ What would you like to do?"""
                 InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
             ],
             [
-                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
+                InlineKeyboardButton("✏️ Edit Post", callback_data="edit_post"),
+                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone")
+            ],
+            [
                 InlineKeyboardButton("❌ Cancel", callback_data="cancel")
             ]
         ]
@@ -613,7 +1010,10 @@ What would you like to do?"""
                 InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate")
             ],
             [
-                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone"),
+                InlineKeyboardButton("✏️ Edit Post", callback_data="edit_post"),
+                InlineKeyboardButton("🎨 Change Tone", callback_data="change_tone")
+            ],
+            [
                 InlineKeyboardButton("❌ Cancel", callback_data="cancel")
             ]
         ]
@@ -708,6 +1108,12 @@ What would you like to do?"""
                     await self._show_initial_tone_selection_from_callback(query, self.user_sessions[user_id])
                 return
             
+            # Handle skip context callback
+            if callback_data == "skip_context":
+                if user_id in self.user_sessions:
+                    await self._handle_skip_context(query, self.user_sessions[user_id])
+                return
+            
             # Handle strategy callbacks  
             if callback_data in ["cancel_strategy", "use_ai_strategy", "customize_strategy", "manual_selection"]:
                 if user_id in self.user_sessions:
@@ -740,8 +1146,13 @@ What would you like to do?"""
             action_handlers = {
                 'approve': lambda: self._approve_post(query, session),
                 'regenerate': lambda: self._regenerate_post(query, session),
+                'edit_post': lambda: self._handle_edit_post_request(query, session),
                 'cancel': lambda: self._cancel_session(query, user_id),
                 'change_tone': lambda: self._show_tone_options(query, session),
+                'skip_followup_context': lambda: self._handle_skip_followup_context(query, session),
+                'skip_batch_context': lambda: self._handle_skip_batch_context(query, session),
+                'length_short': lambda: self._handle_length_selection(query, session, 'short'),
+                'length_long': lambda: self._handle_length_selection(query, session, 'long'),
                 'tone': lambda: self._handle_tone_selection(query, session, callback_data),
                 'strategy': lambda: self._handle_strategy_callback(query, session),
                 'export': lambda: self._handle_export_action(query, user_id, callback_data.get('type', '')),
@@ -893,8 +1304,31 @@ What would you like to do?"""
         
         session = self.user_sessions.get(user_id)
         
-        if session and session.get('state') == 'awaiting_continuation_input':
+        if not session:
+            # Default behavior for unexpected text
+            await self._send_formatted_message(update, "Thanks for your message! If you want to generate a post, please send me a `.md` file. "
+                "Use `/help` to see all commands.")
+            return
+        
+        # Check for timeout in free-form states
+        if session.get('state') in ['awaiting_file_context', 'awaiting_story_edits', 
+                                   'awaiting_followup_context', 'awaiting_batch_context']:
+            if self._check_freeform_timeout(session):
+                session['state'] = None
+                await self._send_formatted_message(update, "⏰ No input received within 5 minutes. Continuing with default generation.")
+                return
+        
+        # Route based on session state
+        if session.get('state') == 'awaiting_continuation_input':
             await self._handle_continuation_post(update, context, text)
+        elif session.get('state') == 'awaiting_file_context':
+            await self._handle_file_context_input(update, context, text)
+        elif session.get('state') == 'awaiting_story_edits':
+            await self._handle_story_edit_input(update, context, text)
+        elif session.get('state') == 'awaiting_followup_context':
+            await self._handle_followup_context_input(update, context, text)
+        elif session.get('state') == 'awaiting_batch_context':
+            await self._handle_batch_context_input(update, context, text)
         else:
             # Default behavior for unexpected text
             await self._send_formatted_message(update, "Thanks for your message! If you want to generate a post, please send me a `.md` file. "
@@ -916,6 +1350,23 @@ What would you like to do?"""
             # Add post to series using existing multi-post infrastructure
             user_id = query.from_user.id
             self._add_post_to_series(user_id, post_data, record_id)
+            
+            # Phase 1: Track post approval in chat history
+            self._add_chat_history_entry(
+                user_id=user_id,
+                user_message="Approved post",
+                bot_response="Post approved and saved to Airtable",
+                message_type="post_approval",
+                context={
+                    'airtable_record_id': record_id,
+                    'tone_used': post_data.get('tone_used', 'Unknown'),
+                    'filename': filename
+                },
+                satisfaction_score=1.0  # High satisfaction for approval
+            )
+            
+            # Phase 3: Save session to enhanced storage
+            self._save_session_to_storage(user_id, session)
             
             # Show success message with follow-up options
             success_message = f"""✅ Post Approved & Saved!
@@ -999,52 +1450,15 @@ Choose a relationship type:"""
     async def _handle_followup_relationship_selection(self, query, session, relationship_type):
         """Handle relationship type selection for follow-up posts."""
         try:
-            # Get session context
-            session_context = session.get('session_context', '')
-            previous_posts = session.get('posts', [])
+            # Store the selected relationship type
+            session['selected_relationship_type'] = relationship_type
+            session['last_activity'] = datetime.now().isoformat()
             
-            # Generate follow-up post with the selected relationship type
-            await self._send_formatted_message(query, f"🔄 Generating follow-up post with {relationship_type} relationship...\n\n"
-                "⏳ This may take a moment...")
-            
-            # Use the original markdown content with context awareness
-            markdown_content = session['original_markdown']
-            
-            # Determine parent post (use the most recent post)
-            parent_post_id = str(previous_posts[-1]['post_id']) if previous_posts else None
-            
-            # Generate the follow-up post
-            if relationship_type == 'ai_choose':
-                # Let AI choose the best relationship
-                post_data = self.ai_generator.generate_facebook_post(
-                    markdown_content,
-                    user_tone_preference=None,
-                    session_context=session_context,
-                    previous_posts=previous_posts,
-                    relationship_type=None,  # Let AI choose
-                    parent_post_id=parent_post_id,
-                    audience_type='business'
-                )
-            else:
-                # Use the selected relationship type
-                post_data = self.ai_generator.generate_facebook_post(
-                    markdown_content,
-                    user_tone_preference=None,
-                    session_context=session_context,
-                    previous_posts=previous_posts,
-                    relationship_type=relationship_type,
-                    parent_post_id=parent_post_id,
-                    audience_type='business'
-                )
-            
-            # Store the generated post
-            session['current_draft'] = post_data
-            
-            # Show the generated follow-up post
-            await self._show_generated_post(query, post_data, session)
+            # Ask for follow-up context
+            await self._ask_for_followup_context(query, session, relationship_type)
             
         except Exception as e:
-            await self._send_formatted_message(query, f"❌ Error generating follow-up post: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error setting up follow-up context: {str(e)}")
 
     async def _view_series(self, query, session):
         """Show the current series of posts."""
@@ -1126,7 +1540,31 @@ Send another markdown file to generate more posts!"""
                 feedback="User requested regeneration - try different tone or approach"
             )
             
+            # Store original content for tracking
+            original_content = session.get('current_draft', {}).get('post_content', '')
+            
             session['current_draft'] = post_data
+            
+            # Phase 1: Track post regeneration in chat history
+            user_id = query.from_user.id
+            self._track_post_regeneration(
+                user_id=user_id,
+                reason="User requested regeneration - try different tone or approach",
+                original_content=original_content,
+                new_content=post_data.get('post_content', '')
+            )
+            
+            self._add_chat_history_entry(
+                user_id=user_id,
+                user_message="Requested post regeneration",
+                bot_response="Post regenerated with different approach",
+                message_type="post_regeneration",
+                context={
+                    'reason': "User requested regeneration - try different tone or approach",
+                    'tone_used': post_data.get('tone_used', 'Unknown')
+                },
+                satisfaction_score=0.5  # Neutral satisfaction for regeneration
+            )
             
             # Show the regenerated post
             await self._show_generated_post(query, post_data, session)
@@ -1151,9 +1589,33 @@ Send another markdown file to generate more posts!"""
                 tone_preference=tone
             )
             
+            # Store original content for tracking
+            original_content = session.get('current_draft', {}).get('post_content', '')
+            
             # Update session with new draft
             session['current_draft'] = post_data
             session['last_activity'] = datetime.now()
+            
+            # Phase 1: Track tone-specific regeneration in chat history
+            user_id = query.from_user.id
+            self._track_post_regeneration(
+                user_id=user_id,
+                reason=f"User requested {tone} tone",
+                original_content=original_content,
+                new_content=post_data.get('post_content', '')
+            )
+            
+            self._add_chat_history_entry(
+                user_id=user_id,
+                user_message=f"Requested regeneration with {tone} tone",
+                bot_response=f"Post regenerated with {tone} tone",
+                message_type="post_regeneration",
+                context={
+                    'reason': f"User requested {tone} tone",
+                    'tone_used': tone
+                },
+                satisfaction_score=0.5  # Neutral satisfaction for regeneration
+            )
             
             # Show the regenerated post
             await self._show_generated_post(query, post_data, session)
@@ -1529,6 +1991,10 @@ Total Posts: {len(posts)}
             [
                 InlineKeyboardButton("🤖 AI Choose", callback_data="initial_ai_choose"),
                 InlineKeyboardButton("📊 Previews", callback_data="show_tone_previews")
+            ],
+            [
+                InlineKeyboardButton("📏 Short Form", callback_data="length_short"),
+                InlineKeyboardButton("📄 Long Form", callback_data="length_long")
             ],
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
         ])
@@ -2538,7 +3004,132 @@ C) Generate posts one by one
                 await self._send_formatted_message(update, "❌ No active batch session to cancel.")
         else:
             await self._send_formatted_message(update, "❌ No active session to cancel.")
+    
+    async def _context_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show context statistics and optimization information."""
+        user_id = update.effective_user.id
+        
+        if user_id not in self.user_sessions:
+            await self._send_formatted_message(update, "❌ No active session. Upload a file first to see context statistics.")
+            return
+        
+        # Get context statistics
+        stats = self._get_context_statistics(user_id)
+        
+        # Format the statistics for display
+        stats_text = f"""🧠 **Context Intelligence Report**
 
+📊 **Interaction Statistics:**
+• Total Interactions: {stats.get('total_interactions', 0)}
+• Recent Activity (24h): {stats.get('recent_activity', 0)}
+• Average Satisfaction: {stats.get('average_satisfaction', 0.0):.2f}
+
+📈 **Satisfaction Distribution:**
+• High Satisfaction (✅): {stats.get('satisfaction_distribution', {}).get('high', 0)}
+• Medium Satisfaction (⚠️): {stats.get('satisfaction_distribution', {}).get('medium', 0)}
+• Low Satisfaction (❌): {stats.get('satisfaction_distribution', {}).get('low', 0)}
+
+🎯 **Message Type Breakdown:**
+"""
+        
+        # Add message type breakdown
+        message_types = stats.get('message_types', {})
+        for msg_type, count in message_types.items():
+            stats_text += f"• {msg_type.replace('_', ' ').title()}: {count}\n"
+        
+        stats_text += f"""
+🔍 **Context Optimization:**
+• Smart prioritization is active
+• Context relevance scoring enabled
+• Token-aware context selection
+• User preference learning active
+
+💡 **How it works:**
+The bot now intelligently selects the most relevant context from your chat history based on:
+• Recency of interactions
+• Your satisfaction with previous responses
+• Content similarity to current requests
+• Importance of interaction types
+
+This ensures the AI always has the most helpful context for generating better posts!"""
+        
+        await self._send_formatted_message(update, stats_text)
+    
+    async def _stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show comprehensive user statistics from enhanced storage."""
+        user_id = update.effective_user.id
+        
+        # Get user statistics from enhanced storage
+        stats = self._get_user_statistics(user_id)
+        
+        if "error" in stats:
+            await self._send_formatted_message(update, f"❌ Error retrieving statistics: {stats['error']}")
+            return
+        
+        # Format statistics for display
+        stats_text = f"""📊 **Enhanced User Statistics**
+
+👤 **User Profile:**
+• User ID: {stats.get('user_id', 'Unknown')}
+• Member since: {stats.get('created_at', 'Unknown')}
+• Last activity: {stats.get('last_activity', 'Unknown')}
+
+📈 **Activity Summary:**
+• Total Sessions: {stats.get('total_sessions', 0)}
+• Total Posts Created: {stats.get('total_posts', 0)}
+• Total Interactions: {stats.get('total_interactions', 0)}
+• Recent Activity (24h): {stats.get('recent_activity_24h', 0)}
+
+🎯 **Performance Metrics:**
+• Average Satisfaction: {stats.get('average_satisfaction', 0.0):.2f}
+• High Satisfaction Interactions: {stats.get('high_satisfaction_count', 0)}
+• Low Satisfaction Interactions: {stats.get('low_satisfaction_count', 0)}
+
+💾 **Storage Information:**
+• Data persistence enabled
+• Cross-session learning active
+• User preference tracking active
+
+💡 **How this helps:**
+The bot learns from your interactions to provide increasingly personalized content generation!"""
+        
+        await self._send_formatted_message(update, stats_text)
+    
+    async def _sessions_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show user's recent sessions from enhanced storage."""
+        user_id = update.effective_user.id
+        
+        # Get recent sessions from enhanced storage
+        sessions = self.enhanced_storage.get_session_list(user_id, limit=5)
+        
+        if not sessions:
+            await self._send_formatted_message(update, "📁 No previous sessions found. Start by uploading a file!")
+            return
+        
+        # Format sessions for display
+        sessions_text = "📁 **Recent Sessions**\n\n"
+        
+        for i, session in enumerate(sessions, 1):
+            # Format timestamp
+            try:
+                last_activity = datetime.fromisoformat(session['last_activity'].replace('Z', '+00:00'))
+                time_str = last_activity.strftime("%b %d, %H:%M")
+            except:
+                time_str = session['last_activity']
+            
+            sessions_text += f"**{i}. {session['filename']}**\n"
+            sessions_text += f"📅 {time_str}\n"
+            sessions_text += f"📝 Posts: {session['post_count']}\n"
+            sessions_text += f"🆔 Session: `{session['session_id'][:8]}...`\n\n"
+        
+        sessions_text += "💾 **Storage Features:**\n"
+        sessions_text += "• Persistent session storage\n"
+        sessions_text += "• Cross-session learning\n"
+        sessions_text += "• User preference tracking\n"
+        sessions_text += "• Performance analytics"
+        
+        await self._send_formatted_message(update, sessions_text)
+    
     def _suggest_posting_timeline(self, file_count: int) -> str:
         """Suggest optimal posting timeline based on file count."""
         if file_count <= 3:
@@ -2592,16 +3183,8 @@ C) Generate posts one by one
     async def _handle_ai_strategy(self, query, session: Dict):
         """Handle AI strategy selection."""
         try:
-            # Update message to show processing
-            processing_message = (
-                "🔄 Processing Files\n\n"
-                "Analyzing files and generating content sequence..."
-            )
-            
-            await self._send_formatted_message(query, processing_message)
-            
-            # Generate posts using AI strategy
-            await self._generate_batch_posts(query, session)
+            # Ask for batch context before generating posts
+            await self._ask_for_batch_context(query, session)
             
         except Exception as e:
             logger.error(f"Error handling AI strategy: {str(e)}")
@@ -2860,11 +3443,17 @@ C) Generate posts one by one
                 # Create tasks for parallel processing
                 for file_data in batch:
                     previous_files = files[:i]  # Files processed before this one
+                    
+                    # Get batch context for this post
+                    batch_context = session.get('batch_context', '')
+                    
                     task = self._process_in_background(
                         self.ai_generator.generate_facebook_post,
                         file_data['content'],
                         user_tone_preference=session.get('selected_tone'),
-                        audience_type='business'
+                        audience_type='business',
+                        freeform_context=batch_context,  # Apply batch context to all posts
+                        length_preference=session.get('length_preference')  # Apply length preference to all posts
                     )
                     tasks.append(task)
                 
@@ -3105,10 +3694,14 @@ Options:
             
             # Generate post with AI tone selection
             markdown_content = session['original_markdown']
+            freeform_context = session.get('freeform_context')
+            
             post_data = self.ai_generator.generate_facebook_post(
                 markdown_content,
                 user_tone_preference=None,  # Let AI choose
-                audience_type='business'
+                audience_type='business',
+                freeform_context=freeform_context,
+                length_preference=session.get('length_preference')
             )
             
             # Store and show the post
@@ -3126,10 +3719,14 @@ Options:
             
             # Generate post with specified tone
             markdown_content = session['original_markdown']
+            freeform_context = session.get('freeform_context')
+            
             post_data = self.ai_generator.generate_facebook_post(
                 markdown_content,
                 user_tone_preference=tone,
-                audience_type='business'
+                audience_type='business',
+                freeform_context=freeform_context,
+                length_preference=session.get('length_preference')
             )
             
             # Store and show the post
@@ -3365,6 +3962,628 @@ What would you like to do next?"""
             
         except Exception as e:
             await self._send_formatted_message(query, f"❌ Error exporting series: {str(e)}")
+
+    # ============================================================================
+    # Phase 1: Core Free-Form Infrastructure
+    # ============================================================================
+
+    def _check_freeform_timeout(self, session: Dict) -> bool:
+        """Check if a free-form session has timed out (5 minutes)."""
+        if not session or 'last_activity' not in session:
+            return True
+        
+        try:
+            last_activity = datetime.fromisoformat(session['last_activity'])
+            timeout_threshold = datetime.now() - timedelta(minutes=5)
+            return last_activity < timeout_threshold
+        except (ValueError, TypeError):
+            return True
+
+    def _validate_freeform_input(self, text: str) -> bool:
+        """Validate free-form input text."""
+        if not text or not text.strip():
+            return False
+        
+        # Check length limit (500 characters)
+        if len(text.strip()) > 500:
+            return False
+        
+        return True
+
+    def _parse_edit_instructions(self, edit_text: str) -> Dict:
+        """Parse edit instructions into structured format."""
+        edit_text = edit_text.strip().lower()
+        
+        # Initialize default structure
+        parsed = {
+            'action': 'modify',
+            'target': 'content',
+            'specific_instructions': edit_text,
+            'tone_change': None,
+            'length_change': None
+        }
+        
+        # Check for tone change requests
+        tone_keywords = {
+            'casual': ['casual', 'informal', 'relaxed', 'friendly'],
+            'professional': ['professional', 'formal', 'business'],
+            'technical': ['technical', 'detailed', 'code-focused'],
+            'inspirational': ['inspirational', 'motivational', 'encouraging']
+        }
+        
+        for tone, keywords in tone_keywords.items():
+            if any(keyword in edit_text for keyword in keywords):
+                parsed['tone_change'] = tone
+                break
+        
+        # Check for length change requests and set action accordingly
+        if any(word in edit_text for word in ['short', 'brief', 'concise', 'shorter', 'make it short']):
+            parsed['length_change'] = 'short'
+            parsed['action'] = 'shorten'
+        elif any(word in edit_text for word in ['long', 'detailed', 'comprehensive', 'longer', 'make it long', 'expand']):
+            parsed['length_change'] = 'long'
+            parsed['action'] = 'expand'
+        
+        # Identify other action types (only if not already set by length)
+        if parsed['action'] == 'modify':
+            if any(word in edit_text for word in ['expand', 'add', 'include', 'more']):
+                parsed['action'] = 'expand'
+            elif any(word in edit_text for word in ['restructure', 'reorganize', 'rearrange']):
+                parsed['action'] = 'restructure'
+            elif any(word in edit_text for word in ['focus', 'emphasize', 'highlight']):
+                parsed['action'] = 'focus'
+            elif any(word in edit_text for word in ['shorten', 'condense', 'brief']):
+                parsed['action'] = 'shorten'
+        
+        return parsed
+
+    def _preserve_tone_unless_changed(self, original_tone: str, edit_instruction: str) -> str:
+        """Preserve original tone unless explicitly changed in edit instruction."""
+        parsed = self._parse_edit_instructions(edit_instruction)
+        if parsed.get('tone_change'):
+            # Return the detected tone change with proper capitalization
+            tone_mapping = {
+                'casual': 'Casual',
+                'professional': 'Professional', 
+                'technical': 'Technical',
+                'inspirational': 'Inspirational'
+            }
+            return tone_mapping.get(parsed['tone_change'], parsed['tone_change'].title())
+        return original_tone
+
+    def _get_length_preference_from_edit(self, edit_instruction: str) -> Optional[str]:
+        """Extract length preference from edit instruction."""
+        parsed = self._parse_edit_instructions(edit_instruction)
+        return parsed.get('length_change')
+
+    def _build_context_aware_prompt_with_freeform(self, markdown_content: str, freeform_context: str, 
+                                                 user_tone_preference: Optional[str] = None) -> str:
+        """Build enhanced prompt that includes free-form context."""
+        base_prompt = f"""Generate a Facebook post from this markdown content:
+
+{markdown_content}
+
+Additional Context/Instructions: {freeform_context}
+
+Tone Preference: {user_tone_preference or 'AI-chosen'}
+
+Please incorporate the additional context and instructions while maintaining the core content and requested tone."""
+        
+        return base_prompt
+
+    async def _handle_file_context_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+        """Handle free-form input for file context."""
+        user_id = update.effective_user.id
+        session = self.user_sessions.get(user_id)
+        
+        if not session:
+            await self._send_formatted_message(update, "❌ No active session found. Please upload a file first.")
+            return
+        
+        # Validate input
+        if not self._validate_freeform_input(text):
+            await self._send_formatted_message(update, "❌ Invalid input. Please provide clear instructions under 500 characters.")
+            return
+        
+        # Store the free-form context
+        session['freeform_context'] = text.strip()
+        session['last_activity'] = datetime.now().isoformat()
+        
+        # Reset state to indicate processing is complete
+        session['state'] = None
+        
+        # Show tone selection with context stored
+        await self._show_initial_tone_selection(update, context, session)
+
+    async def _handle_story_edit_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+        """Handle free-form input for story editing."""
+        user_id = update.effective_user.id
+        session = self.user_sessions.get(user_id)
+        
+        if not session:
+            await self._send_formatted_message(update, "❌ No active session found.")
+            return
+        
+        # Validate input
+        if not self._validate_freeform_input(text):
+            await self._send_formatted_message(update, "❌ Invalid input. Please provide clear instructions under 500 characters.")
+            return
+        
+        # Store edit instructions
+        session['edit_instructions'] = text.strip()
+        session['last_activity'] = datetime.now().isoformat()
+        
+        # Edit post with instructions
+        await self._edit_post_with_instructions(update, context, text.strip())
+
+    async def _handle_followup_context_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+        """Handle free-form input for follow-up context."""
+        user_id = update.effective_user.id
+        session = self.user_sessions.get(user_id)
+        
+        if not session:
+            await self._send_formatted_message(update, "❌ No active session found.")
+            return
+        
+        # Validate input
+        if not self._validate_freeform_input(text):
+            await self._send_formatted_message(update, "❌ Invalid input. Please provide clear instructions under 500 characters.")
+            return
+        
+        # Store follow-up context
+        session['followup_context'] = text.strip()
+        session['last_activity'] = datetime.now().isoformat()
+        
+        # Generate follow-up with both relationship type and context
+        await self._generate_followup_with_relationship_and_context(update, context, session)
+
+    async def _handle_batch_context_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+        """Handle free-form input for batch context."""
+        user_id = update.effective_user.id
+        session = self.user_sessions.get(user_id)
+        
+        if not session:
+            await self._send_formatted_message(update, "❌ No active session found.")
+            return
+        
+        # Validate input
+        if not self._validate_freeform_input(text):
+            await self._send_formatted_message(update, "❌ Invalid input. Please provide clear instructions under 500 characters.")
+            return
+        
+        # Store batch context
+        session['batch_context'] = text.strip()
+        session['last_activity'] = datetime.now().isoformat()
+        
+        # Generate batch posts with context
+        await self._generate_batch_posts_with_context(update, context, session)
+
+    async def _edit_post_with_instructions(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                                         edit_instructions: str):
+        """Edit post with specific instructions."""
+        try:
+            user_id = update.effective_user.id
+            session = self.user_sessions.get(user_id)
+            
+            if not session:
+                await self._send_formatted_message(update, "❌ No active session found.")
+                return
+            
+            # Get the current post content to edit
+            current_draft = session.get('current_draft', {})
+            original_post_content = current_draft.get('post_content', '')
+            original_tone = current_draft.get('tone_used', 'Unknown')
+            original_markdown = session.get('original_markdown', '')
+            
+            if not original_post_content:
+                await self._send_formatted_message(update, "❌ No post content found to edit.")
+                return
+            
+            # Parse edit instructions
+            parsed_instructions = self._parse_edit_instructions(edit_instructions)
+            
+            # Get length preference from edit instructions
+            length_preference = self._get_length_preference_from_edit(edit_instructions)
+            
+            # Get context for editing
+            session_context = session.get('session_context', '')
+            previous_posts = session.get('posts', [])
+            relationship_type = current_draft.get('relationship_type')
+            parent_post_id = current_draft.get('parent_post_id')
+            
+            # Use AI generator to edit the post
+            result = self.ai_generator.edit_post(
+                original_post_content=original_post_content,
+                edit_instructions=edit_instructions,
+                original_tone=original_tone,
+                original_markdown=original_markdown,
+                session_context=session_context,
+                previous_posts=previous_posts,
+                relationship_type=relationship_type,
+                parent_post_id=parent_post_id,
+                audience_type='business',
+                length_preference=length_preference
+            )
+            
+            # Update session
+            session['current_draft'] = result
+            session['state'] = None
+            session['last_activity'] = datetime.now().isoformat()
+            
+            # Track the edit in chat history
+            self._add_chat_history_entry(
+                user_id=user_id,
+                user_message=f"Edit request: {edit_instructions}",
+                bot_response="Post edited with requested changes",
+                message_type="post_edit",
+                context={
+                    'edit_instructions': edit_instructions,
+                    'parsed_action': parsed_instructions['action'],
+                    'original_tone': original_tone,
+                    'new_tone': result.get('tone_used', 'Unknown')
+                },
+                satisfaction_score=0.7  # Slightly positive for edits
+            )
+            
+            # Show edited post
+            await self._show_generated_post(update, result, session)
+            
+        except Exception as e:
+            await self._send_formatted_message(update, f"❌ Error editing post: {str(e)}")
+
+    async def _generate_followup_with_context(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                                            followup_context: str):
+        """Generate follow-up post with custom context."""
+        try:
+            user_id = update.effective_user.id
+            session = self.user_sessions.get(user_id)
+            
+            # Get previous posts
+            posts = session.get('posts', [])
+            if not posts:
+                await self._send_formatted_message(update, "❌ No previous posts to build upon.")
+                return
+            
+            # Generate follow-up with context
+            result = self.ai_generator.generate_related_post(
+                session['original_markdown'],
+                posts,
+                'integration_expansion',  # Default relationship type
+                user_tone_preference=None,
+                followup_context=followup_context
+            )
+            
+            # Update session
+            session['current_draft'] = result
+            session['state'] = None
+            session['last_activity'] = datetime.now().isoformat()
+            
+            # Show generated follow-up
+            await self._show_generated_post(update, result, session)
+            
+        except Exception as e:
+            await self._send_formatted_message(update, f"❌ Error generating follow-up: {str(e)}")
+
+    async def _generate_followup_with_relationship_and_context(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                                                             session: Dict):
+        """Generate follow-up post with both relationship type and custom context."""
+        try:
+            # Get relationship type and context
+            relationship_type = session.get('selected_relationship_type', 'ai_choose')
+            followup_context = session.get('followup_context', '')
+            
+            # Get session context and previous posts
+            session_context = session.get('session_context', '')
+            previous_posts = session.get('posts', [])
+            
+            if not previous_posts:
+                await self._send_formatted_message(update, "❌ No previous posts to build upon.")
+                return
+            
+            # Show generation message
+            relationship_types = self.ai_generator.get_relationship_types()
+            relationship_display = relationship_types.get(relationship_type, relationship_type)
+            
+            context_info = f" with context: '{followup_context}'" if followup_context else ""
+            await self._send_formatted_message(update, f"🔄 Generating follow-up post with {relationship_display} relationship{context_info}...\n\n"
+                "⏳ This may take a moment...")
+            
+            # Use the original markdown content
+            markdown_content = session['original_markdown']
+            
+            # Determine parent post (use the most recent post)
+            parent_post_id = str(previous_posts[-1]['post_id']) if previous_posts else None
+            
+            # Generate the follow-up post
+            if relationship_type == 'ai_choose':
+                # Let AI choose the best relationship
+                post_data = self.ai_generator.generate_facebook_post(
+                    markdown_content,
+                    user_tone_preference=None,
+                    session_context=session_context,
+                    previous_posts=previous_posts,
+                    relationship_type=None,  # Let AI choose
+                    parent_post_id=parent_post_id,
+                    audience_type='business',
+                    followup_context=followup_context,
+                    length_preference=session.get('length_preference')
+                )
+            else:
+                # Use the selected relationship type
+                post_data = self.ai_generator.generate_facebook_post(
+                    markdown_content,
+                    user_tone_preference=None,
+                    session_context=session_context,
+                    previous_posts=previous_posts,
+                    relationship_type=relationship_type,
+                    parent_post_id=parent_post_id,
+                    audience_type='business',
+                    followup_context=followup_context,
+                    length_preference=session.get('length_preference')
+                )
+            
+            # Store the generated post
+            session['current_draft'] = post_data
+            session['state'] = None
+            session['last_activity'] = datetime.now().isoformat()
+            
+            # Clear temporary data
+            session.pop('selected_relationship_type', None)
+            session.pop('followup_context', None)
+            
+            # Show the generated follow-up post
+            await self._show_generated_post(update, post_data, session)
+            
+        except Exception as e:
+            await self._send_formatted_message(update, f"❌ Error generating follow-up post: {str(e)}")
+
+    async def _apply_batch_context(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                                 batch_context: str):
+        """Apply context to batch processing."""
+        try:
+            user_id = update.effective_user.id
+            session = self.user_sessions.get(user_id)
+            
+            # Store batch context for use in generation
+            session['batch_context'] = batch_context
+            session['state'] = None
+            session['last_activity'] = datetime.now().isoformat()
+            
+            await self._send_formatted_message(update, f"✅ Batch context saved: {batch_context}")
+            
+        except Exception as e:
+            await self._send_formatted_message(update, f"❌ Error applying batch context: {str(e)}")
+
+    async def _generate_batch_posts_with_context(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                                               session: Dict):
+        """Generate batch posts with context applied to all posts."""
+        try:
+            # Get batch context
+            batch_context = session.get('batch_context', '')
+            
+            # Show generation message with context info
+            context_info = f" with context: '{batch_context}'" if batch_context else ""
+            await self._send_formatted_message(update, f"🚀 Generating batch posts{context_info}...\n\n"
+                "⏳ This may take a few minutes...")
+            
+            # Generate posts using the enhanced method
+            await self._generate_batch_posts(update, session)
+            
+        except Exception as e:
+            await self._send_formatted_message(update, f"❌ Error generating batch posts: {str(e)}")
+
+    async def _handle_skip_batch_context(self, query, session: Dict):
+        """Handle skip batch context callback."""
+        try:
+            # Generate batch posts without context
+            await self._generate_batch_posts_with_context(query, None, session)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error processing skip: {str(e)}")
+
+    # ============================================================================
+    # Phase 2: File Upload Context
+    # ============================================================================
+
+    async def _ask_for_file_context(self, update: Update, context: ContextTypes.DEFAULT_TYPE, session: Dict):
+        """Ask user for free-form context after file upload."""
+        try:
+            user_id = update.effective_user.id
+            
+            # Set session state to await file context
+            session['state'] = 'awaiting_file_context'
+            session['last_activity'] = datetime.now().isoformat()
+            
+            # Create context prompt message
+            context_message = f"""📝 **File Uploaded Successfully!**
+
+📁 **File:** {session['filename']}
+📊 **Content Preview:** {session['original_markdown'][:100]}...
+
+Would you like to provide any context or specific instructions for this post?
+
+**Examples:**
+• "Focus on technical challenges and include code examples"
+• "Emphasize the business impact and ROI"
+• "Make it more casual and relatable"
+• "Add more details about the deployment process"
+
+**Type your instructions or 'skip' to continue with default generation.**
+
+⏰ *You have 5 minutes to respond.*"""
+            
+            # Create keyboard with skip option
+            keyboard = [
+                [InlineKeyboardButton("⏭️ Skip Context", callback_data="skip_context")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(update, context_message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            logger.error(f"Error asking for file context: {str(e)}")
+            # Fallback to normal flow
+            session['state'] = None
+            await self._show_initial_tone_selection(update, context, session)
+
+    async def _ask_for_followup_context(self, query, session: Dict, relationship_type: str):
+        """Ask user for follow-up context after relationship selection."""
+        try:
+            # Set session state to await follow-up context
+            session['state'] = 'awaiting_followup_context'
+            session['last_activity'] = datetime.now().isoformat()
+            
+            # Get relationship display name
+            relationship_types = self.ai_generator.get_relationship_types()
+            relationship_display = relationship_types.get(relationship_type, relationship_type)
+            
+            # Create context prompt message
+            context_message = f"""🔄 **Follow-up Context (Optional)**
+
+You selected: **{relationship_display}**
+
+Would you like to provide any specific context for this follow-up post?
+
+**Examples:**
+• "Focus on the lessons learned and what I'd do differently"
+• "Emphasize the next steps and future plans"
+• "Add more technical details about the implementation"
+• "Make it more personal and share the emotional journey"
+• "Include specific metrics and results"
+
+**Type your instructions or 'skip' to continue:**
+
+⏰ *You have 5 minutes to respond.*"""
+            
+            # Create keyboard with skip option
+            keyboard = [
+                [InlineKeyboardButton("⏭️ Skip Context", callback_data="skip_followup_context")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(query, context_message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            logger.error(f"Error asking for follow-up context: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error asking for follow-up context: {str(e)}")
+
+    async def _ask_for_batch_context(self, query, session: Dict):
+        """Ask user for batch context before generating posts."""
+        try:
+            # Set session state to await batch context
+            session['state'] = 'awaiting_batch_context'
+            session['last_activity'] = datetime.now().isoformat()
+            
+            # Get batch information
+            files = session.get('files', [])
+            strategy = session.get('content_strategy', {})
+            
+            # Create context prompt message
+            context_message = f"""📚 **Batch Context (Optional)**
+
+You have **{len(files)} files** ready for processing.
+
+Would you like to provide any specific context that should apply to ALL posts in this batch?
+
+**Examples:**
+• "Focus on technical implementation details across all posts"
+• "Emphasize business impact and ROI in every post"
+• "Make all posts more casual and relatable"
+• "Include code examples where relevant"
+• "Focus on lessons learned and future improvements"
+
+**Type your instructions or 'skip' to continue:**
+
+⏰ *You have 5 minutes to respond.*"""
+            
+            # Create keyboard with skip option
+            keyboard = [
+                [InlineKeyboardButton("⏭️ Skip Context", callback_data="skip_batch_context")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(query, context_message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            logger.error(f"Error asking for batch context: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error asking for batch context: {str(e)}")
+
+    async def _handle_edit_post_request(self, query, session: Dict):
+        """Handle edit post request and show edit interface."""
+        try:
+            # Set session state to await story edits
+            session['state'] = 'awaiting_story_edits'
+            session['last_activity'] = datetime.now().isoformat()
+            
+            # Create edit prompt message
+            edit_message = f"""✏️ **Edit Post**
+
+What would you like to change about this post?
+
+**Examples:**
+• "Expand on the technical challenges and include more code examples"
+• "Restructure to focus on business impact instead of technical details"
+• "Add more details about the deployment process"
+• "Make it more casual and relatable"
+• "Shorten the introduction and expand the conclusion"
+• "Change the tone to be more technical"
+• "Add more specific examples"
+
+**Type your edit instructions below:**
+
+⏰ *You have 5 minutes to respond.*"""
+            
+            # Create keyboard with cancel option
+            keyboard = [
+                [InlineKeyboardButton("❌ Cancel Edit", callback_data="cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await self._send_formatted_message(query, edit_message, reply_markup=reply_markup)
+            
+        except Exception as e:
+            logger.error(f"Error showing edit interface: {str(e)}")
+            await self._send_formatted_message(query, f"❌ Error showing edit interface: {str(e)}")
+
+    async def _handle_skip_context(self, query, session: Dict):
+        """Handle skip context callback."""
+        try:
+            # Reset state and proceed with normal flow
+            session['state'] = None
+            session['last_activity'] = datetime.now().isoformat()
+            
+            # Show tone selection
+            await self._show_initial_tone_selection_from_callback(query, session)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error processing skip: {str(e)}")
+
+    async def _handle_skip_followup_context(self, query, session: Dict):
+        """Handle skip followup context callback."""
+        try:
+            # Generate follow-up without context
+            await self._generate_followup_with_relationship_and_context(query, None, session)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error processing skip: {str(e)}")
+
+    async def _handle_length_selection(self, query, session: Dict, length: str):
+        """Handle length selection (short/long form)."""
+        try:
+            # Store length preference
+            session['length_preference'] = length
+            
+            # Show confirmation message
+            length_display = "Short Form" if length == 'short' else "Long Form"
+            await self._send_formatted_message(query, f"✅ Length set to: **{length_display}**\n\n"
+                "Now choose your tone style:")
+            
+            # Show tone selection interface
+            await self._show_initial_tone_selection_interface(query, session)
+            
+        except Exception as e:
+            await self._send_formatted_message(query, f"❌ Error setting length: {str(e)}")
 
 if __name__ == "__main__":
     # Load environment variables
